@@ -185,9 +185,10 @@ class _ToolViewState extends ConsumerState<ToolsView> {
     return _cachedSearchItems!;
   }
 
-  void _pushPage(BuildContext context, String title, Widget page) {
+  void _pushPage(BuildContext context, String title, Widget page, {double? maxWidth}) {
     showExtend(
       context,
+      props: ExtendProps(maxWidth: maxWidth),
       builder: (_, type) =>
           AdaptiveSheetScaffold(type: type, title: title, body: page),
     );
@@ -259,6 +260,7 @@ class _ToolViewState extends ConsumerState<ToolsView> {
           context,
           FixedProxyView.title(context),
           const FixedProxyView(),
+          maxWidth: 820,
         ),
       ),
       _SearchItem(
@@ -1439,6 +1441,8 @@ class _ToolViewState extends ConsumerState<ToolsView> {
             title: Text(FixedProxyView.title(context)),
             delegate: NextDelegate(
               title: FixedProxyView.title(context),
+              forceFull: false,
+              maxWidth: 820,
               builder: (_) => const FixedProxyView(),
             ),
           ),

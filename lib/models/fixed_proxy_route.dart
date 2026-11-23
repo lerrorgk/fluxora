@@ -3,18 +3,35 @@
 typedef FixedHop = ({String source, String node});
 
 class FixedProxyRoute {
-  const FixedProxyRoute(this.port, this.hops);
+  const FixedProxyRoute(
+    this.port,
+    this.hops, {
+    this.name = '',
+    this.enabled = true,
+  });
+  final String name;
+  final bool enabled;
+
+  FixedProxyRoute withEnabled(bool value) =>
+      FixedProxyRoute(port, hops, name: name, enabled: value);
   final int port;
   final List<FixedHop> hops;
 
   factory FixedProxyRoute.fromJson(Map<String, dynamic> json) =>
-      FixedProxyRoute(json['port'] as int, [
-        for (final hop in json['hops'] as List)
-          (source: hop['source'] as String, node: hop['node'] as String),
-      ]);
+      FixedProxyRoute(
+        json['port'] as int,
+        [
+          for (final hop in json['hops'] as List)
+            (source: hop['source'] as String, node: hop['node'] as String),
+        ],
+        name: json['name'] as String? ?? '',
+        enabled: json['enabled'] as bool? ?? true,
+      );
 
   Map<String, dynamic> toJson() => {
     'port': port,
+    'name': name,
+    'enabled': enabled,
     'hops': [
       for (final hop in hops) {'source': hop.source, 'node': hop.node},
     ],
@@ -25,6 +42,7 @@ class FixedProxyRoute {
   /// Add the whole route or none of it. Missing hops never fall through to
   /// the main selector. Original proxy objects are left untouched.
   String? attach(Map<String, dynamic> config, Map<FixedHop, Map> nodes) {
+    if (!enabled) return null;
     if (port < 1 || port > 65535 || hops.isEmpty) return 'Invalid route';
     final listeners = (config['listeners'] as List?) ?? const [];
     final occupied = [

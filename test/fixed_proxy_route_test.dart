@@ -17,6 +17,32 @@ void main() {
   };
 
   test(
+    'legacy ports stay enabled and disabled ports do not create listeners',
+    () {
+      final legacy = FixedProxyRoute.fromJson({
+        'port': 23001,
+        'hops': [
+          {'source': 'sub-A', 'node': 'Tokyo'},
+        ],
+      });
+      expect(legacy.name, isEmpty);
+      expect(legacy.enabled, isTrue);
+      final disabled = FixedProxyRoute(
+        legacy.port,
+        legacy.hops,
+        name: 'Browser',
+        enabled: false,
+      );
+      final restored = FixedProxyRoute.fromJson(disabled.toJson());
+      final raw = <String, dynamic>{};
+      expect(restored.name, 'Browser');
+      expect(restored.enabled, isFalse);
+      expect(restored.attach(raw, {}), isNull);
+      expect(raw, isEmpty);
+    },
+  );
+
+  test(
     'each listener fixes its own exit and ordered hops across a save/load',
     () {
       final config = <String, dynamic>{
