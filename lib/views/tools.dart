@@ -24,6 +24,7 @@ import 'package:fluxora/views/hotkey.dart';
 import 'package:fluxora/views/other_setting.dart';
 import 'package:fluxora/views/proxies/chain_proxy_view.dart';
 import 'package:fluxora/views/proxies/warp_view.dart';
+import 'package:fluxora/views/proxies/fixed_proxy_view.dart';
 import 'package:fluxora/widgets/widgets.dart';
 import 'package:flutter/material.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart';
@@ -248,6 +249,16 @@ class _ToolViewState extends ConsumerState<ToolsView> {
           context,
           appLocalizations.backupAndRecovery,
           const BackupAndRecovery(),
+        ),
+      ),
+      _SearchItem(
+        title: FixedProxyView.title(context),
+        category: settingsCategory,
+        leading: const Icon(Icons.lan_outlined),
+        onTap: (context, _) => _pushPage(
+          context,
+          FixedProxyView.title(context),
+          const FixedProxyView(),
         ),
       ),
       _SearchItem(
@@ -1423,6 +1434,14 @@ class _ToolViewState extends ConsumerState<ToolsView> {
         title: chinese ? '连接与路由' : 'Connection & routing',
         items: [
           const _ChainProxyItem(),
+          ListItem.next(
+            leading: const _SettingsIcon(Icons.lan_outlined),
+            title: Text(FixedProxyView.title(context)),
+            delegate: NextDelegate(
+              title: FixedProxyView.title(context),
+              builder: (_) => const FixedProxyView(),
+            ),
+          ),
           const _WarpProxyItem(),
           if (system.isAndroid) _AccessItem(),
           if (system.isWindows) _LoopbackItem(),

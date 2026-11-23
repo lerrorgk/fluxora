@@ -5,6 +5,7 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
+	"fmt"
 	"github.com/metacubex/mihomo/adapter"
 	"github.com/metacubex/mihomo/adapter/inbound"
 	"github.com/metacubex/mihomo/adapter/outboundgroup"
@@ -26,6 +27,7 @@ import (
 	"path/filepath"
 	"runtime"
 	"runtime/debug"
+	"strings"
 	"sync"
 	"time"
 )
@@ -120,16 +122,13 @@ func sideUpdateExternalProvider(p cp.Provider, bytes []byte) error {
 	}
 }
 
-func updateListeners() {
-	if !isRunning {
-		return
-	}
-	if currentConfig == nil {
-		return
+func updateListeners() error {
+	if !isRunning || currentConfig == nil {
+		return nil
 	}
 	listeners := currentConfig.Listeners
 	general := currentConfig.General
-	listener.PatchInboundListeners(listeners, tunnel.Tunnel, true)
+	failures := listener.PatchInboundListeners(listeners, tunnel.Tunnel, true)
 	listener.SetAllowLan(general.AllowLan)
 	inbound.SetSkipAuthPrefixes(general.SkipAuthPrefixes)
 	inbound.SetAllowedIPs(general.LanAllowedIPs)
@@ -146,6 +145,13 @@ func updateListeners() {
 	if !features.Android {
 		listener.ReCreateTun(general.Tun, tunnel.Tunnel)
 	}
+	var fixedErrors []error
+	for name, err := range failures {
+		if strings.HasPrefix(name, "fluxora-fixed-") {
+			fixedErrors = append(fixedErrors, fmt.Errorf("%s: %w", name, err))
+		}
+	}
+	return errors.Join(fixedErrors...)
 }
 
 func stopListeners() {
@@ -300,17 +306,18 @@ func setupConfig(params *SetupParams) error {
 		}
 	}
 
-	currentConfig, err = config.ParseRawConfig(rawCfg)
+	parsed, err := config.ParseRawConfig(rawCfg)
 	if err != nil {
 		return err
 	}
+	currentConfig = parsed
 	currentRawConfig = rawCfg
 	hub.ApplyConfig(currentConfig)
 	patchSelectGroup(params.SelectedMap)
-	updateListeners()
+	err = updateListeners()
 	runtime.GC()
 	debug.FreeOSMemory()
-	return nil
+	return err
 }
 
 func UnmarshalJson(data []byte, v any) error {

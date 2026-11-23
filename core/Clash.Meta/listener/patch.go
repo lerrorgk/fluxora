@@ -1,6 +1,7 @@
 package listener
 
 func StopListener() {
+	PatchInboundListeners(nil, nil, true)
 
 	if socksListener != nil {
 		_ = socksListener.Close()

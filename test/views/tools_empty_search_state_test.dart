@@ -17,6 +17,10 @@ import 'package:fluxora/controller.dart';
 import 'package:fluxora/l10n/l10n.dart';
 import 'package:fluxora/models/models.dart';
 import 'package:fluxora/state.dart';
+import 'package:fluxora/manager/chain_proxy_manager.dart';
+import 'package:fluxora/manager/fixed_proxy_routes.dart';
+import 'package:fluxora/models/chain_proxy.dart';
+import 'package:fluxora/models/fixed_proxy_route.dart';
 import 'package:fluxora/views/tools.dart';
 import 'package:fluxora/widgets/fluxora/fluxora.dart';
 
@@ -119,6 +123,34 @@ void main() {
     });
     await tester.pump();
   }
+
+  test('a fixed port can be saved, reopened and deleted', () async {
+    globalState.config = Config(themeProps: defaultThemeProps);
+    const landing = LandingProxy(
+      id: 'test-exit',
+      name: 'Local test exit',
+      server: '127.0.0.1',
+      port: 1080,
+    );
+    await chainProxyManager.updateConfig(
+      (c) => c.copyWith(landingProxies: [landing]),
+      reloadCore: false,
+    );
+    final socket = await ServerSocket.bind(InternetAddress.loopbackIPv4, 0);
+    final port = socket.port;
+    await socket.close();
+    final manager = FixedProxyRoutes();
+    const selected = (source: '', node: 'test-exit');
+    await manager.change(route: FixedProxyRoute(port, [selected]));
+    final reopened = FixedProxyRoutes();
+    await reopened.load();
+    expect(reopened.routes.single.port, port);
+    expect(reopened.routes.single.hops, [selected]);
+    await reopened.change(previousPort: port);
+    final deleted = FixedProxyRoutes();
+    await deleted.load();
+    expect(deleted.routes, isEmpty);
+  }, timeout: const Timeout(Duration(seconds: 10)));
 
   for (final (size, textScale) in const [
     (Size(360, 640), 1.0),

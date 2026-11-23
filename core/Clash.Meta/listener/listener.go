@@ -624,19 +624,25 @@ func PatchTunnel(tunnels []LC.Tunnel, tunnel C.Tunnel) {
 	}
 }
 
-func PatchInboundListeners(newListenerMap map[string]C.InboundListener, tunnel C.Tunnel, dropOld bool) {
+func PatchInboundListeners(newListenerMap map[string]C.InboundListener, tunnel C.Tunnel, dropOld bool) map[string]error {
 	inboundMux.Lock()
 	defer inboundMux.Unlock()
 
+	var failures map[string]error
 	for name, newListener := range newListenerMap {
 		if oldListener, ok := inboundListeners[name]; ok {
 			if !oldListener.Config().Equal(newListener.Config()) {
 				_ = oldListener.Close()
+				delete(inboundListeners, name)
 			} else {
 				continue
 			}
 		}
 		if err := newListener.Listen(tunnel); err != nil {
+			if failures == nil {
+				failures = make(map[string]error)
+			}
+			failures[name] = err
 			log.Errorln("Listener %s listen err: %s", name, err.Error())
 			continue
 		}
@@ -651,6 +657,7 @@ func PatchInboundListeners(newListenerMap map[string]C.InboundListener, tunnel C
 			}
 		}
 	}
+	return failures
 }
 
 // GetPorts return the ports of proxy servers

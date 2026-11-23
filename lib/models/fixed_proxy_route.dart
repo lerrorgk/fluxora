@@ -1,0 +1,96 @@
+/// A hop is identified within its subscription. Saved landing nodes use an
+/// empty source and their persistent ID rather than their editable display name.
+typedef FixedHop = ({String source, String node});
+
+class FixedProxyRoute {
+  const FixedProxyRoute(this.port, this.hops);
+  final int port;
+  final List<FixedHop> hops;
+
+  factory FixedProxyRoute.fromJson(Map<String, dynamic> json) =>
+      FixedProxyRoute(json['port'] as int, [
+        for (final hop in json['hops'] as List)
+          (source: hop['source'] as String, node: hop['node'] as String),
+      ]);
+
+  Map<String, dynamic> toJson() => {
+    'port': port,
+    'hops': [
+      for (final hop in hops) {'source': hop.source, 'node': hop.node},
+    ],
+  };
+
+  String get listener => 'fluxora-fixed-$port';
+
+  /// Add the whole route or none of it. Missing hops never fall through to
+  /// the main selector. Original proxy objects are left untouched.
+  String? attach(Map<String, dynamic> config, Map<FixedHop, Map> nodes) {
+    if (port < 1 || port > 65535 || hops.isEmpty) return 'Invalid route';
+    final listeners = (config['listeners'] as List?) ?? const [];
+    final occupied = [
+      for (final key in [
+        'port',
+        'mixed-port',
+        'socks-port',
+        'redir-port',
+        'tproxy-port',
+      ])
+        config[key],
+      for (final key in ['external-controller', 'external-controller-tls'])
+        config[key]?.toString().split(':').last,
+      if (config['dns'] is Map)
+        config['dns']['listen']?.toString().split(':').last,
+      for (final inbound in listeners.whereType<Map>()) inbound['port'],
+    ];
+    if (occupied.any(_includesPort)) return 'Port $port is already in use';
+    if (listeners.whereType<Map>().any((l) => l['name'] == listener)) {
+      return 'Listener name already in use: $listener';
+    }
+    final proxies = (config['proxies'] as List?) ?? const [];
+    final names = {
+      for (final p in [
+        ...proxies,
+        ...?config['proxy-groups'] as List?,
+      ].whereType<Map>())
+        p['name'],
+    };
+    final copies = <Map<String, dynamic>>[];
+    for (final hop in hops) {
+      final node = nodes[hop];
+      if (node == null) return 'Node unavailable: ${hop.node}';
+      final name = '$listener-hop-${copies.length + 1}';
+      if (names.contains(name)) return 'Proxy name already in use: $name';
+      final copy = Map<String, dynamic>.from(node)
+        ..remove('dialer-proxy')
+        ..['name'] = name
+        ..['fluxora-private'] = true;
+      if (copies.isNotEmpty) copy['dialer-proxy'] = copies.last['name'];
+      copies.add(copy);
+    }
+    config['proxies'] = [...proxies, ...copies];
+    config['listeners'] = [
+      ...listeners,
+      {
+        'name': listener,
+        'type': 'mixed',
+        'listen': '127.0.0.1',
+        'port': port,
+        'proxy': copies.last['name'],
+        'udp': copies.every((p) => p['udp'] != false),
+      },
+    ];
+    return null;
+  }
+
+  bool _includesPort(Object? value) {
+    for (final item in '$value'.split(',')) {
+      final bounds = item.trim().split('-');
+      final first = int.tryParse(bounds.first);
+      final last = int.tryParse(bounds.last);
+      if (first != null && last != null && port >= first && port <= last) {
+        return true;
+      }
+    }
+    return false;
+  }
+}

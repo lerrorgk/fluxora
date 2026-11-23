@@ -908,6 +908,11 @@ func parseProxies(cfg *RawConfig) (proxies map[string]C.Proxy, providersMap map[
 			return nil, nil, fmt.Errorf("proxy %s is the duplicate name", proxy.Name())
 		}
 		proxies[proxy.Name()] = proxy
+		// Fixed-port hops are addressable by listeners and dialers only.
+		// Keep them out of implicit GLOBAL and include-all group membership.
+		if private, _ := mapping["fluxora-private"].(bool); private {
+			continue
+		}
 		proxyList = append(proxyList, proxy.Name())
 		AllProxies = append(AllProxies, proxy.Name())
 	}

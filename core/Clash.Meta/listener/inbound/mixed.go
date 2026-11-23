@@ -63,7 +63,13 @@ func (m *Mixed) Address() string {
 }
 
 // Listen implements constant.InboundListener
-func (m *Mixed) Listen(tunnel C.Tunnel) error {
+func (m *Mixed) Listen(tunnel C.Tunnel) (err error) {
+	// Roll back sockets opened before a later TCP or UDP bind failed.
+	defer func() {
+		if err != nil {
+			_ = m.Close()
+		}
+	}()
 	lc := m.ListenConfig()
 	for _, addr := range strings.Split(m.RawAddress(), ",") {
 		config := LC.AuthServer{
@@ -109,6 +115,8 @@ func (m *Mixed) Close() error {
 			errs = append(errs, fmt.Errorf("close udp listener %s err: %w", l.Address(), err))
 		}
 	}
+	m.l = nil
+	m.lUDP = nil
 	if len(errs) > 0 {
 		return errors.Join(errs...)
 	}

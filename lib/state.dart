@@ -29,6 +29,7 @@ import 'controller.dart';
 import 'manager/chain_proxy_manager.dart';
 import 'manager/warp_manager.dart';
 import 'manager/profile_chain_manager.dart';
+import 'manager/fixed_proxy_routes.dart';
 import 'models/models.dart';
 import 'package:fluxora/common/node_overrides.dart';
 
@@ -291,6 +292,11 @@ class GlobalState {
     await chainProxyManager.init();
     await warpManager.init();
     await profileChainManager.init();
+    try {
+      await fixedProxyRoutes.load();
+    } catch (e) {
+      commonPrint.log('Fixed proxy configuration: $e');
+    }
     final locale =
         utils.getLocaleForString(config.appSetting.locale) ??
         utils.getSystemLocale();
@@ -1422,6 +1428,7 @@ class GlobalState {
       });
     }
 
+    await fixedProxyRoutes.apply(rawConfig);
     final summary = AggregateConfigSummary.fromConfig(rawConfig);
     lastAggregateConfigDiff = lastAggregateConfigSummary == null
         ? null
