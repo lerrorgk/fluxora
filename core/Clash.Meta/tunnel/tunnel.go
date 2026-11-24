@@ -45,8 +45,9 @@ var (
 	rules         []C.Rule
 	listeners     = make(map[string]C.InboundListener)
 	subRules      map[string][]C.Rule
-	proxies       = make(map[string]C.Proxy)
-	providers     map[string]P.ProxyProvider
+	proxies        = make(map[string]C.Proxy)
+	privateProxies map[string]struct{}
+	providers      map[string]P.ProxyProvider
 	ruleProviders map[string]P.RuleProvider
 	configMux     sync.RWMutex
 
@@ -243,6 +244,22 @@ func UpdateProxies(newProxies map[string]C.Proxy, newProviders map[string]P.Prox
 	proxies = newProxies
 	providers = newProviders
 	configMux.Unlock()
+}
+
+// UpdatePrivateProxies records internal proxies (such as fixed-route hops) that
+// remain dialable by listeners and dialers but should stay hidden from public views.
+func UpdatePrivateProxies(names map[string]struct{}) {
+	configMux.Lock()
+	privateProxies = names
+	configMux.Unlock()
+}
+
+// IsPrivateProxy reports whether a proxy name belongs to an internal fixed route.
+func IsPrivateProxy(name string) bool {
+	configMux.RLock()
+	_, ok := privateProxies[name]
+	configMux.RUnlock()
+	return ok
 }
 
 func UpdateListeners(newListeners map[string]C.InboundListener) {

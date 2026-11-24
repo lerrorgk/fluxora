@@ -19,6 +19,10 @@ class _Store extends FixedProxyRoutes {
   _Store([Map<String, String>? bindings])
       : super(readBindings: () async => bindings ?? {'fluxora-fixed-20001': ''});
 
+  int retryCount = 0;
+  Object? changeError;
+  Map<FixedHop, Map> extraCatalog = {};
+
   @override
   final routes = <FixedProxyRoute>[
     const FixedProxyRoute(20001, [front, exit], name: 'Work browser'),
@@ -30,9 +34,15 @@ class _Store extends FixedProxyRoutes {
   Future<Map<FixedHop, Map>> catalog({Set<String>? sources}) async => {
     front: {'name': 'Tokyo 01'},
     exit: {'name': 'Tokyo residential'},
+    ...extraCatalog,
   };
   @override
+  Future<void> retry(int port) async {
+    retryCount++;
+  }
+  @override
   Future<void> change({int? previousPort, FixedProxyRoute? route}) async {
+    if (changeError != null) throw changeError!;
     routes.removeWhere((r) => r.port == previousPort);
     if (route != null) routes.add(route);
     notifyListeners();
@@ -122,7 +132,7 @@ void main() {
     },
   );
 
-  testWidgets('a port bound by another process cannot be credited with an exit', (tester) async {
+  testWidgets('a port bound by another process cannot be credited with an exit and can retry', (tester) async {
     store = _Store({'fluxora-fixed-20001': 'address already in use'});
     await open(tester);
     expect(find.text('address already in use'), findsOneWidget);
@@ -130,6 +140,30 @@ void main() {
     await tester.pumpAndSettle();
     expect(find.text('Looking up exit'), findsNothing);
     expect(store.lastCheck(20001), isNull);
+    await tester.tap(find.text('Retry'));
+    await tester.pumpAndSettle();
+    expect(store.retryCount, 1);
+  });
+
+  testWidgets('editor stays open on save failure and card displays pinned subscription dialers', (tester) async {
+    const relay = (source: 'subscription', node: 'HK Bridge');
+    store.extraCatalog = {
+      front: {'name': 'Tokyo 01', 'dialer-proxy': 'HK Bridge'},
+      relay: {'name': 'HK Bridge'},
+    };
+    store.changeError = StateError('Port 20001 is already in use');
+    await open(tester);
+    expect(find.text('HK Bridge'), findsWidgets);
+    await tester.tap(find.byTooltip('Port actions').first);
+    await tester.pumpAndSettle();
+    await tester.tap(find.text('Edit port'));
+    await tester.pumpAndSettle();
+    await tester.enterText(find.byType(TextFormField).first, 'Unsaved Name');
+    await tester.tap(find.text('Save port'));
+    await tester.pumpAndSettle();
+    expect(find.text('Port 20001 is already in use'), findsOneWidget);
+    expect(find.text('Unsaved Name'), findsOneWidget);
+    expect(tester.takeException(), isNull);
   });
 
   testWidgets(

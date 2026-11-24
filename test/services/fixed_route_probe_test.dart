@@ -115,4 +115,37 @@ void main() {
       expect(hosts, [latency.host]);
     },
   );
+
+  test(
+    'authenticates against a local proxy that requires Basic credentials',
+    () async {
+      proxy.listen((r) async {
+        final auth = r.headers.value(HttpHeaders.proxyAuthorizationHeader);
+        if (auth != 'Basic dXNlcjpzZWNyZXQ=') {
+          r.response.statusCode = HttpStatus.proxyAuthenticationRequired;
+          r.response.headers.set('Proxy-Authenticate', 'Basic');
+          await r.response.close();
+          return;
+        }
+        if (r.uri.host == latency.host) {
+          r.response.statusCode = 204;
+        } else {
+          r.response.write('{"ip":"203.0.113.9","country":"Singapore"}');
+        }
+        await r.response.close();
+      });
+      final unauth = await probe().run(latency.toString());
+      expect(unauth.latencyError, RouteProbeError.http);
+      expect(unauth.exit, isNull);
+
+      final authed = await FixedRouteProbe(
+        proxy.port,
+        timeout: const Duration(seconds: 2),
+        exitSources: [lookup],
+        credentials: (username: 'user', password: 'secret'),
+      ).run(latency.toString());
+      expect(authed.latencyMs, isNotNull);
+      expect(authed.exit?.ip, '203.0.113.9');
+    },
+  );
 }

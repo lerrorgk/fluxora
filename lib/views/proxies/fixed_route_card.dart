@@ -6,6 +6,7 @@ class _RouteCard extends StatelessWidget {
   const _RouteCard({
     required this.route,
     required this.labels,
+    this.pinnedDialers = const [],
     required this.report,
     required this.checking,
     required this.issue,
@@ -14,16 +15,19 @@ class _RouteCard extends StatelessWidget {
     required this.onEdit,
     required this.onDelete,
     required this.onCopy,
+    this.onRetry,
     required this.onCheck,
   });
   final FixedProxyRoute route;
   final Map<FixedHop, _NodeLabel> labels;
+  final List<FixedHop> pinnedDialers;
   final FixedRouteReport? report;
   final bool checking, busy;
   final String? issue;
   final ValueChanged<bool> onToggle;
   final VoidCallback onEdit, onDelete;
   final ValueChanged<String> onCopy;
+  final VoidCallback? onRetry;
   final VoidCallback? onCheck;
 
   @override
@@ -45,7 +49,7 @@ class _RouteCard extends StatelessWidget {
       hasIp,
     )) {
       (false, _, _, _, _, _) => (zh('已停用', 'Disabled'), c.onSurfaceVariant),
-      (_, != null, _, _, _, _) => (zh('配置异常', 'Invalid route'), c.error),
+      (_, != null, _, _, _, _) => (zh('入口不可用', 'Unavailable'), c.error),
       (_, _, true, null, _, _) => (
         zh('正在测试延迟', 'Measuring latency'),
         c.primary,
@@ -67,8 +71,14 @@ class _RouteCard extends StatelessWidget {
       fontWeight: FontWeight.w700,
     );
     final nodes = <Widget>[];
-    for (var i = 0; i < route.hops.length; i++) {
-      final h = route.hops[i], label = labels[h];
+    final chain = [
+      for (final h in pinnedDialers) (hop: h, pinned: true),
+      for (final h in route.hops) (hop: h, pinned: false),
+    ];
+    for (var i = 0; i < chain.length; i++) {
+      final item = chain[i];
+      final h = item.hop, label = labels[h];
+      final isExit = route.enabled && i == chain.length - 1;
       nodes.add(
         Row(
           mainAxisSize: MainAxisSize.min,
@@ -84,16 +94,28 @@ class _RouteCard extends StatelessWidget {
               ),
             Flexible(
               child: Tooltip(
-                message: label?.source ?? h.node,
+                message: item.pinned
+                    ? zh(
+                        '订阅内置前置 · ${label?.source ?? h.node}',
+                        'Subscription dialer · ${label?.source ?? h.node}',
+                      )
+                    : (label?.source ?? h.node),
                 child: Container(
                   padding: const EdgeInsets.symmetric(
                     horizontal: 8,
                     vertical: 5,
                   ),
                   decoration: BoxDecoration(
-                    color: route.enabled && i == route.hops.length - 1
+                    color: isExit
                         ? c.secondaryContainer
+                        : item.pinned
+                        ? c.surfaceContainer
                         : c.surfaceContainerHigh,
+                    border: item.pinned
+                        ? Border.all(
+                            color: c.outlineVariant.withValues(alpha: .8),
+                          )
+                        : null,
                     borderRadius: BorderRadius.circular(6),
                   ),
                   child: Text(
@@ -101,7 +123,7 @@ class _RouteCard extends StatelessWidget {
                     overflow: TextOverflow.ellipsis,
                     maxLines: 1,
                     style: t.textTheme.labelMedium?.copyWith(
-                      color: route.enabled && i == route.hops.length - 1
+                      color: isExit
                           ? c.onSecondaryContainer
                           : c.onSurfaceVariant,
                     ),
@@ -146,7 +168,7 @@ class _RouteCard extends StatelessWidget {
                   child: Padding(
                     padding: const EdgeInsets.all(10),
                     child: Icon(
-                      route.hops.length > 1
+                      chain.length > 1
                           ? Icons.alt_route_rounded
                           : Icons.lan_outlined,
                       size: 21,
@@ -339,7 +361,13 @@ class _RouteCard extends StatelessWidget {
                       ),
                   ],
                 ),
-                if (route.enabled)
+                if (route.enabled && issue != null)
+                  TextButton.icon(
+                    onPressed: onRetry,
+                    icon: const Icon(Icons.refresh_rounded, size: 17),
+                    label: Text(zh('重试绑定', 'Retry')),
+                  )
+                else if (route.enabled)
                   TextButton.icon(
                     onPressed: onCheck,
                     icon: Icon(

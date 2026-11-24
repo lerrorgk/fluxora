@@ -2,6 +2,7 @@ import 'dart:convert';
 
 import 'package:fluxora/clash/clash.dart';
 import 'package:fluxora/common/common.dart';
+import 'package:fluxora/manager/fixed_proxy_routes.dart';
 import 'package:fluxora/models/models.dart';
 import 'package:fluxora/models/node_share_link.dart';
 import 'package:fluxora/state.dart';
@@ -113,7 +114,8 @@ class _ProfileNodesViewState extends State<ProfileNodesView> {
       context.showNotifier(appLocalizations.nodeDeleted(proxyName));
     }
     // Reload core if active
-    if (globalState.config.currentProfileId == _profile.id) {
+    if (globalState.config.currentProfileId == _profile.id ||
+        fixedProxyRoutes.usesSource(_profile.id)) {
       globalState.appController.applyProfileDebounce(silence: true);
     }
   }
@@ -227,7 +229,8 @@ class _ProfileNodesViewState extends State<ProfileNodesView> {
                     appLocalizations.batchImportSuccess(parsedList.length),
                   );
                 }
-                if (globalState.config.currentProfileId == _profile.id) {
+                if (globalState.config.currentProfileId == _profile.id ||
+                    fixedProxyRoutes.usesSource(_profile.id)) {
                   globalState.appController.applyProfileDebounce(silence: true);
                 }
               },
@@ -247,7 +250,8 @@ class _ProfileNodesViewState extends State<ProfileNodesView> {
         onSaved: (updatedProfile) async {
           setState(() => _profile = updatedProfile);
           await _loadProxies();
-          if (globalState.config.currentProfileId == _profile.id) {
+          if (globalState.config.currentProfileId == _profile.id ||
+              fixedProxyRoutes.usesSource(_profile.id)) {
             globalState.appController.applyProfileDebounce(silence: true);
           }
         },
@@ -522,7 +526,8 @@ class _ProfileNodesViewState extends State<ProfileNodesView> {
       }
       return;
     }
-    if (globalState.config.currentProfileId == _profile.id) {
+    if (globalState.config.currentProfileId == _profile.id ||
+        fixedProxyRoutes.usesSource(_profile.id)) {
       globalState.appController.applyProfileDebounce(silence: true);
     }
     if (mounted) {

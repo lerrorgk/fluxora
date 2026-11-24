@@ -4,13 +4,17 @@ class _RouteEditor extends StatefulWidget {
   const _RouteEditor({
     required this.original,
     required this.labels,
+    required this.catalogNodes,
     required this.suggested,
     required this.used,
+    required this.onSave,
   });
   final FixedProxyRoute? original;
   final Map<FixedHop, _NodeLabel> labels;
+  final Map<FixedHop, Map> catalogNodes;
   final int suggested;
   final Set<int> used;
+  final Future<void> Function(FixedProxyRoute route) onSave;
   @override
   State<_RouteEditor> createState() => _RouteEditorState();
 }
@@ -23,6 +27,8 @@ class _RouteEditorState extends State<_RouteEditor> {
   late final hops = [...?widget.original?.hops];
   late bool enabled = widget.original?.enabled ?? true;
   final form = GlobalKey<FormState>();
+  bool saving = false;
+  String? saveError;
 
   @override
   void dispose() {
@@ -32,12 +38,14 @@ class _RouteEditorState extends State<_RouteEditor> {
   }
 
   Future<void> choose([int? index]) async {
+    if (saving) return;
     final h = await showDialog<FixedHop>(
       context: context,
       builder: (_) => _NodePicker(labels: widget.labels),
     );
     if (!mounted || h == null) return;
     setState(() {
+      saveError = null;
       if (index == null) {
         hops.add(h);
       } else {
@@ -47,21 +55,36 @@ class _RouteEditorState extends State<_RouteEditor> {
   }
 
   void move(int from, int to) => setState(() {
+    saveError = null;
     final h = hops.removeAt(from);
     hops.insert(to, h);
   });
 
-  void save() {
-    if (form.currentState!.validate()) {
-      Navigator.pop(
-        context,
-        FixedProxyRoute(
-          int.parse(port.text),
-          List.of(hops),
-          name: name.text.trim(),
-          enabled: enabled,
-        ),
-      );
+  Future<void> save() async {
+    if (saving || !form.currentState!.validate()) return;
+    setState(() {
+      saving = true;
+      saveError = null;
+    });
+    final candidate = FixedProxyRoute(
+      int.parse(port.text),
+      List.of(hops),
+      name: name.text.trim(),
+      enabled: enabled,
+    );
+    try {
+      await widget.onSave(candidate);
+      if (mounted) Navigator.pop(context, true);
+    } catch (e) {
+      if (mounted) {
+        setState(() {
+          saving = false;
+          saveError = e.toString().replaceFirst(
+            RegExp(r'^(Bad state|FormatException):\s*'),
+            '',
+          );
+        });
+      }
     }
   }
 
@@ -99,6 +122,9 @@ class _RouteEditorState extends State<_RouteEditor> {
         return null;
       },
     );
+    final dialerInfo = hops.isEmpty
+        ? null
+        : FixedProxyRoute(1, hops).resolveDialers(widget.catalogNodes);
     return AlertDialog(
       insetPadding: const EdgeInsets.symmetric(horizontal: 14, vertical: 16),
       scrollable: true,
@@ -110,6 +136,16 @@ class _RouteEditorState extends State<_RouteEditor> {
           child: Column(
             crossAxisAlignment: CrossAxisAlignment.stretch,
             children: [
+              if (saving)
+                const Padding(
+                  padding: EdgeInsets.only(bottom: 10),
+                  child: LinearProgressIndicator(),
+                ),
+              if (saveError != null)
+                Padding(
+                  padding: const EdgeInsets.only(bottom: 10),
+                  child: Text(saveError!, style: TextStyle(color: c.error)),
+                ),
               const SizedBox(height: 6),
               MediaQuery.sizeOf(context).width < 420
                   ? Column(
@@ -145,6 +181,25 @@ class _RouteEditorState extends State<_RouteEditor> {
                 ),
               ),
               const SizedBox(height: 10),
+              if (dialerInfo != null && dialerInfo.dialers.isNotEmpty)
+                Padding(
+                  padding: const EdgeInsets.only(bottom: 8),
+                  child: Text(
+                    zh(
+                      '将自动前置订阅跳板：${dialerInfo.dialers.map((h) => widget.labels[h]?.name ?? h.node).join(' → ')}',
+                      'Auto-pinned subscription dialer: ${dialerInfo.dialers.map((h) => widget.labels[h]?.name ?? h.node).join(' → ')}',
+                    ),
+                    style: t.textTheme.bodySmall?.copyWith(color: c.primary),
+                  ),
+                ),
+              if (enabled && dialerInfo?.error != null)
+                Padding(
+                  padding: const EdgeInsets.only(bottom: 8),
+                  child: Text(
+                    dialerInfo!.error!,
+                    style: t.textTheme.bodySmall?.copyWith(color: c.error),
+                  ),
+                ),
               for (var i = 0; i < hops.length; i++)
                 Padding(
                   padding: const EdgeInsets.only(bottom: 6),
@@ -241,7 +296,12 @@ class _RouteEditorState extends State<_RouteEditor> {
                 title: Text(zh('启用入口', 'Enable port')),
                 subtitle: const Text('HTTP / SOCKS5 · 127.0.0.1'),
                 value: enabled,
-                onChanged: (v) => setState(() => enabled = v),
+                onChanged: saving
+                    ? null
+                    : (v) => setState(() {
+                        saveError = null;
+                        enabled = v;
+                      }),
               ),
             ],
           ),
@@ -249,12 +309,13 @@ class _RouteEditorState extends State<_RouteEditor> {
       ),
       actions: [
         TextButton(
-          onPressed: () => Navigator.pop(context),
+          onPressed: saving ? null : () => Navigator.pop(context),
           child: Text(MaterialLocalizations.of(context).cancelButtonLabel),
         ),
         FilledButton(
           onPressed:
-              hops.isEmpty ||
+              saving ||
+                  hops.isEmpty ||
                   enabled && hops.any((h) => !widget.labels.containsKey(h))
               ? null
               : save,

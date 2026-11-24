@@ -27,10 +27,10 @@ class FixedProxyView extends ConsumerStatefulWidget {
   const FixedProxyView({
     super.key,
     this.store,
-    this.createProbe = FixedRouteProbe.new,
+    this.createProbe,
   });
   final FixedProxyRoutes? store;
-  final FixedRouteProbe Function(int) createProbe;
+  final FixedRouteProbe Function(int)? createProbe;
   static String title(BuildContext c) => _text(c, '独立代理', 'Fixed proxies');
   @override
   ConsumerState<FixedProxyView> createState() => _FixedProxyViewState();
@@ -38,6 +38,7 @@ class FixedProxyView extends ConsumerStatefulWidget {
 
 class _FixedProxyViewState extends ConsumerState<FixedProxyView> {
   late final store = widget.store ?? fixedProxyRoutes;
+  Map<FixedHop, Map> catalogNodes = {};
   Map<FixedHop, _NodeLabel> labels = {};
   final progress = <int, FixedRouteReport>{};
   final active = <int, FixedRouteProbe>{};
@@ -64,6 +65,7 @@ class _FixedProxyViewState extends ConsumerState<FixedProxyView> {
       final sources = {
         for (final p in globalState.config.profiles) p.id: p.label ?? p.id,
       };
+      catalogNodes = catalog;
       labels = {
         for (final e in catalog.entries)
           e.key: (
@@ -116,7 +118,28 @@ class _FixedProxyViewState extends ConsumerState<FixedProxyView> {
     super.dispose();
   }
 
-  Future<void> _change(int? previous, FixedProxyRoute? route) async {
+  ({String username, String password})? _localProxyCredentials() {
+    final clash = globalState.config.patchClashConfig;
+    if (clash.authentication.isEmpty ||
+        clash.skipAuthPrefixes.any(
+          (p) => p == '127.0.0.1/8' || p == '127.0.0.1/32' || p == '127.0.0.0/8',
+        )) {
+      return null;
+    }
+    final entry = clash.authentication.first;
+    final colon = entry.indexOf(':');
+    if (colon <= 0) return null;
+    return (
+      username: entry.substring(0, colon),
+      password: entry.substring(colon + 1),
+    );
+  }
+
+  Future<void> _change(
+    int? previous,
+    FixedProxyRoute? route, {
+    bool rethrowError = false,
+  }) async {
     if (busy) return;
     setState(() {
       busy = true;
@@ -126,7 +149,30 @@ class _FixedProxyViewState extends ConsumerState<FixedProxyView> {
     try {
       await store.change(previousPort: previous, route: route);
     } catch (e) {
-      error = e.toString();
+      if (rethrowError) rethrow;
+      error = e.toString().replaceFirst(
+        RegExp(r'^(Bad state|FormatException):\s*'),
+        '',
+      );
+    } finally {
+      if (mounted) setState(() => busy = false);
+    }
+  }
+
+  Future<void> _retry(int port) async {
+    if (busy) return;
+    setState(() {
+      busy = true;
+      error = null;
+      _cancel();
+    });
+    try {
+      await store.retry(port);
+    } catch (e) {
+      error = e.toString().replaceFirst(
+        RegExp(r'^(Bad state|FormatException):\s*'),
+        '',
+      );
     } finally {
       if (mounted) setState(() => busy = false);
     }
@@ -138,16 +184,17 @@ class _FixedProxyViewState extends ConsumerState<FixedProxyView> {
     while (used.contains(port) && port < 65535) {
       port++;
     }
-    final r = await showDialog<FixedProxyRoute>(
+    await showDialog<bool>(
       context: context,
       builder: (_) => _RouteEditor(
         original: original,
         labels: labels,
+        catalogNodes: catalogNodes,
         suggested: port,
         used: used,
+        onSave: (route) => _change(original?.port, route, rethrowError: true),
       ),
     );
-    if (r != null && mounted) await _change(original?.port, r);
   }
 
   Future<void> _remove(FixedProxyRoute route) async {
@@ -211,7 +258,9 @@ class _FixedProxyViewState extends ConsumerState<FixedProxyView> {
         !store.routes.any((r) => r.port == port && r.enabled)) {
       return;
     }
-    final probe = widget.createProbe(port);
+    final probe =
+        widget.createProbe?.call(port) ??
+        FixedRouteProbe(port, credentials: _localProxyCredentials());
     final url = globalState.config.appSetting.testUrl.trim();
     setState(() {
       progress.remove(port);
@@ -276,12 +325,17 @@ class _FixedProxyViewState extends ConsumerState<FixedProxyView> {
     });
     final routes = store.routes;
     final enabled = routes.where((r) => r.enabled).length;
+    final localAuthRequired = _localProxyCredentials() != null;
+    final pinnedByPort = {
+      for (final r in routes) r.port: r.resolveDialers(catalogNodes).dialers,
+    };
     final filtered = routes
         .where(
           (r) => [
             _routeName(context, r),
             r.port.toString(),
-            for (final h in r.hops) labels[h]?.name ?? h.node,
+            for (final h in [...?pinnedByPort[r.port], ...r.hops])
+              labels[h]?.name ?? h.node,
           ].join(' ').toLowerCase().contains(query),
         )
         .toList();
@@ -405,6 +459,17 @@ class _FixedProxyViewState extends ConsumerState<FixedProxyView> {
                         style: TextStyle(color: c.onSurfaceVariant),
                       ),
                     ),
+                  if (localAuthRequired)
+                    Padding(
+                      padding: const EdgeInsets.only(top: 6),
+                      child: Text(
+                        zh(
+                          '已开启本机代理认证，应用连接固定端口时需填写代理账号密码。',
+                          'Local proxy authentication is enabled; apps must provide proxy credentials.',
+                        ),
+                        style: TextStyle(color: c.onSurfaceVariant),
+                      ),
+                    ),
                   const SizedBox(height: 14),
                 ],
                 if (!busy && routes.isEmpty)
@@ -443,6 +508,7 @@ class _FixedProxyViewState extends ConsumerState<FixedProxyView> {
                     child: _RouteCard(
                       route: r,
                       labels: labels,
+                      pinnedDialers: pinnedByPort[r.port] ?? const [],
                       report: active.containsKey(r.port)
                           ? progress[r.port]
                           : store.lastCheck(r.port),
@@ -453,6 +519,10 @@ class _FixedProxyViewState extends ConsumerState<FixedProxyView> {
                       onEdit: () => _edit(r),
                       onDelete: () => _remove(r),
                       onCopy: _copy,
+                      onRetry:
+                          busy || !r.enabled || store.issueFor(r.port) == null
+                          ? null
+                          : () => _retry(r.port),
                       onCheck:
                           !running ||
                               busy ||

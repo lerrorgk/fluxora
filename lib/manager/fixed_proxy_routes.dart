@@ -7,18 +7,29 @@ import 'package:fluxora/clash/clash.dart';
 import 'package:fluxora/common/common.dart';
 import 'package:fluxora/manager/chain_proxy_manager.dart';
 import 'package:fluxora/models/chain_proxy.dart';
+import 'package:fluxora/models/clash_config.dart';
 import 'package:fluxora/models/fixed_proxy_route.dart';
 import 'package:fluxora/services/atomic_config_storage.dart';
 import 'package:fluxora/state.dart';
 import 'package:fluxora/services/fixed_route_probe.dart';
 import 'package:path/path.dart' as p;
 import 'package:synchronized/synchronized.dart';
+import 'package:yaml/yaml.dart';
 
 class FixedProxyRoutes extends ChangeNotifier {
-  FixedProxyRoutes({Future<Map<String, String>> Function()? readBindings})
-      : _readBindings = readBindings ?? (() => clashCore.clashInterface.getFixedListenerStatus());
+  FixedProxyRoutes({
+    Future<Map<String, String>> Function()? readBindings,
+    Future<String> Function(String yaml)? validateSnippet,
+    Future<Map<String, dynamic>> Function(String profileId)? readProfile,
+  }) : _readBindings =
+           readBindings ??
+           (() => clashCore.clashInterface.getFixedListenerStatus()),
+       _validateSnippet = validateSnippet,
+       _readProfile = readProfile;
 
   final Future<Map<String, String>> Function() _readBindings;
+  final Future<String> Function(String yaml)? _validateSnippet;
+  final Future<Map<String, dynamic>> Function(String profileId)? _readProfile;
   final _lock = Lock();
   final _bindingLock = Lock();
   final _routes = <FixedProxyRoute>[];
@@ -64,10 +75,22 @@ class FixedProxyRoutes extends ChangeNotifier {
     return status ?? 'Listener binding could not be confirmed';
   }
 
+  bool usesSource(String profileId) =>
+      profileId.isNotEmpty &&
+      _routes.any((r) => r.enabled && r.hops.any((h) => h.source == profileId));
+
   Future<void> refreshBindings() => _bindingLock.synchronized(() async {
     final request = _bindingRequest;
     final session = globalState.startTime;
-    if (session == null || !routes.any((r) => r.enabled)) return;
+    if (session == null) return;
+    if (!routes.any((r) => r.enabled)) {
+      if (_bindings.isNotEmpty || _bindingSession != session) {
+        _bindings = {};
+        _bindingSession = session;
+        notifyListeners();
+      }
+      return;
+    }
     Map<String, String> status = {};
     try {
       status = await _readBindings();
@@ -81,6 +104,20 @@ class FixedProxyRoutes extends ChangeNotifier {
     _reports.removeWhere((port, _) => issueFor(port) != null);
     notifyListeners();
   });
+
+  Future<void> retry(int port) async {
+    await load();
+    final route = _routes.firstWhereOrNull((r) => r.port == port && r.enabled);
+    if (route == null) return;
+    if (!globalState.isStart) {
+      await change(previousPort: port, route: route);
+      return;
+    }
+    await _lock.synchronized(() async {
+      await globalState.appController.applyProfile(silence: true);
+      await refreshBindings();
+    });
+  }
 
   Future<AtomicConfigStorage> _storage() async => AtomicConfigStorage(
     p.join(await appPath.homeDirPath, 'fixed_proxy_routes.json'),
@@ -124,6 +161,130 @@ class FixedProxyRoutes extends ChangeNotifier {
     _loaded = true;
   }
 
+  static Object? _toPlainYaml(Object? value) {
+    if (value is YamlMap) {
+      return {
+        for (final entry in value.entries)
+          entry.key.toString(): _toPlainYaml(entry.value),
+      };
+    }
+    if (value is YamlList) {
+      return [for (final item in value) _toPlainYaml(item)];
+    }
+    return value;
+  }
+
+  static bool _isUsableCatalogProxy(Map proxy) {
+    final name = proxy['name'];
+    final type = proxy['type'];
+    final hasEndpoint =
+        proxy['server'] != null ||
+        (proxy['peers'] is List && (proxy['peers'] as List).isNotEmpty);
+    return name is String &&
+        type is String &&
+        hasEndpoint &&
+        ChainProxyConfig.isSelectableProxy(name: name, type: type);
+  }
+
+  static Map<String, dynamic> _normalizeProxy(
+    Map proxy,
+    Object? globalFingerprint,
+  ) {
+    final map = Map<String, dynamic>.from(proxy);
+    final type = map['type']?.toString().toLowerCase();
+    final isTls = map['tls'] == true;
+    final supportsFp =
+        type == 'trojan' ||
+        type == 'anytls' ||
+        ((type == 'vmess' || type == 'vless') && isTls);
+    if (supportsFp &&
+        globalFingerprint != null &&
+        map['client-fingerprint'] == null) {
+      map['client-fingerprint'] = globalFingerprint;
+    }
+    final realityOpts = map['reality-opts'];
+    if (realityOpts is Map) {
+      final shortId = realityOpts['short-id'];
+      if (shortId is int) {
+        map['reality-opts'] = Map<String, dynamic>.from(realityOpts)
+          ..['short-id'] = shortId.toString();
+      }
+    }
+    return map;
+  }
+
+  Future<void> _collectProviderProxies(
+    String profileId,
+    Map raw,
+    Object? globalFingerprint,
+    Map<FixedHop, Map> nodes,
+  ) async {
+    final providers = raw['proxy-providers'];
+    if (providers is! Map || providers.isEmpty) return;
+    String? homeDir;
+    for (final entry in providers.entries) {
+      final provider = entry.value;
+      if (provider is! Map) continue;
+      final type = provider['type']?.toString().toLowerCase();
+      final override = provider['override'];
+      final prefix = override is Map
+          ? override['additional-prefix']?.toString() ?? ''
+          : '';
+      final suffix = override is Map
+          ? override['additional-suffix']?.toString() ?? ''
+          : '';
+      List? rawProxies;
+      try {
+        if (type == 'inline' && provider['payload'] is List) {
+          rawProxies = provider['payload'] as List;
+        } else {
+          String? filePath;
+          if (type == 'http' && provider['url'] is String) {
+            final url = (provider['url'] as String).trim();
+            if (url.isNotEmpty) {
+              filePath = await appPath.getProvidersFilePath(
+                profileId,
+                'proxies',
+                url,
+              );
+            }
+          } else if (type == 'file' && provider['path'] is String) {
+            final rawPath = (provider['path'] as String).trim();
+            if (rawPath.isNotEmpty) {
+              if (p.isAbsolute(rawPath)) {
+                filePath = rawPath;
+              } else {
+                homeDir ??= await appPath.homeDirPath;
+                filePath = p.join(homeDir, rawPath);
+              }
+            }
+          }
+          if (filePath != null) {
+            final file = File(filePath);
+            if (await file.exists()) {
+              final loaded = _toPlainYaml(loadYaml(await file.readAsString()));
+              if (loaded is Map && loaded['proxies'] is List) {
+                rawProxies = loaded['proxies'] as List;
+              }
+            }
+          }
+        }
+      } catch (e) {
+        commonPrint.log(
+          'Fixed proxy: could not read provider ${entry.key} in $profileId: $e',
+        );
+      }
+      if (rawProxies == null) continue;
+      for (final proxy in rawProxies.whereType<Map>()) {
+        if (!_isUsableCatalogProxy(proxy)) continue;
+        final normalized = _normalizeProxy(proxy, globalFingerprint);
+        final name = '$prefix${normalized['name']}$suffix';
+        normalized['name'] = name;
+        nodes.putIfAbsent((source: profileId, node: name), () => normalized);
+      }
+    }
+  }
+
   /// Store references only. Credentials are resolved from their original
   /// subscription or the landing library each time a core config is built.
   Future<Map<FixedHop, Map>> catalog({Set<String>? sources}) async {
@@ -131,17 +292,22 @@ class FixedProxyRoutes extends ChangeNotifier {
     for (final profile in globalState.config.profiles) {
       if (sources != null && !sources.contains(profile.id)) continue;
       try {
-        final raw = await globalState.getProfileConfig(profile.id);
+        final raw = await (_readProfile?.call(profile.id) ??
+            globalState.getProfileConfig(profile.id));
+        final globalFingerprint = raw['global-client-fingerprint'];
         for (final proxy in (raw['proxies'] as List? ?? []).whereType<Map>()) {
-          final name = proxy['name'];
-          final type = proxy['type'];
-          if (name is String &&
-              type is String &&
-              proxy['server'] != null &&
-              ChainProxyConfig.isSelectableProxy(name: name, type: type)) {
-            nodes[(source: profile.id, node: name)] = proxy;
+          if (_isUsableCatalogProxy(proxy)) {
+            final normalized = _normalizeProxy(proxy, globalFingerprint);
+            nodes[(source: profile.id, node: normalized['name'] as String)] =
+                normalized;
           }
         }
+        await _collectProviderProxies(
+          profile.id,
+          raw,
+          globalFingerprint,
+          nodes,
+        );
       } catch (e) {
         commonPrint.log(
           'Fixed proxy: could not read subscription ${profile.id}: $e',
@@ -191,6 +357,50 @@ class FixedProxyRoutes extends ChangeNotifier {
     }
   }
 
+  Future<Map<String, dynamic>> _buildPreviewConfig() async {
+    final patch = globalState.config.patchClashConfig;
+    final preview = Map<String, dynamic>.from(patch.toJson());
+    preview['dns'] = patch.dns.toJson();
+    preview['tunnels'] = [for (final t in patch.tunnels) t.toClashJson()];
+    if (globalState.hasAppController) {
+      preview['mixed-port'] = globalState.appController.effectiveMixedPort;
+    }
+    final prefs = preferences.sharedPreferencesCompleter.isCompleted
+        ? await preferences.sharedPreferencesCompleter.future
+        : null;
+    final forceLoopback = prefs?.getBool('force_loopback_controller') ?? true;
+    preview['external-controller'] = resolveExternalControllerValue(
+      configured: patch.externalController,
+      forceLoopback: forceLoopback,
+      sessionController: globalState.sessionExternalController,
+      allowLan: patch.allowLan,
+    );
+    return preview;
+  }
+
+  Future<void> _validatePreviewRoute(Map<String, dynamic> preview) async {
+    final validator =
+        _validateSnippet ??
+        (globalState.hasAppController &&
+                clashCore.clashInterface.hasLiveProcess
+            ? (String yaml) async => await clashCore.validateConfig(yaml)
+            : null);
+    if (validator == null) return;
+    final copies = [
+      for (final proxy in (preview['proxies'] as List? ?? const []).whereType<Map>())
+        Map<String, dynamic>.from(proxy)..remove('fluxora-private'),
+    ];
+    final snippet = await encodeCompactYamlTask({
+      'mode': 'rule',
+      'proxies': copies,
+      'listeners': preview['listeners'],
+    });
+    final message = await validator(snippet);
+    if (message.isNotEmpty) {
+      throw StateError(message);
+    }
+  }
+
   Future<void> change({int? previousPort, FixedProxyRoute? route}) async {
     await load();
     await _lock.synchronized(() async {
@@ -200,8 +410,10 @@ class FixedProxyRoutes extends ChangeNotifier {
           route != null &&
           old.port == route.port &&
           const ListEquality<FixedHop>().equals(old.hops, route.hops);
+      final hadIssue =
+          old != null && old.enabled && issueFor(old.port) != null;
       final reload =
-          !(samePath && old.enabled == route.enabled) &&
+          (!(samePath && old.enabled == route.enabled) || hadIssue) &&
           (old?.enabled == true || route?.enabled == true);
       final next = [..._routes]..removeWhere((r) => r.port == previousPort);
       if (route != null) {
@@ -215,9 +427,7 @@ class FixedProxyRoutes extends ChangeNotifier {
           final nodes = await catalog(
             sources: route.hops.map((h) => h.source).toSet(),
           );
-          final preview = Map<String, dynamic>.from(
-            globalState.config.patchClashConfig.toJson(),
-          );
+          final preview = await _buildPreviewConfig();
           final issue = route.attach(preview, nodes);
           if (issue != null) throw StateError(issue);
           if (route.port != previousPort ||
@@ -238,6 +448,9 @@ class FixedProxyRoutes extends ChangeNotifier {
             } finally {
               await socket.close();
             }
+          }
+          if (!globalState.isStart) {
+            await _validatePreviewRoute(preview);
           }
         }
         next.add(route);
@@ -261,6 +474,16 @@ class FixedProxyRoutes extends ChangeNotifier {
           'version': 1,
           'routes': [for (final r in next) r.toJson()],
         });
+        if (!running) {
+          if (previousPort != null) {
+            issues.remove(previousPort);
+            _paths.remove(previousPort);
+          }
+          if (route != null) {
+            issues.remove(route.port);
+            if (!route.enabled) _paths.remove(route.port);
+          }
+        }
         if (reload) {
           _reports.remove(previousPort);
           _reports.remove(route?.port);

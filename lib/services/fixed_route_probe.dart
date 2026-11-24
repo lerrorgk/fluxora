@@ -29,6 +29,7 @@ class FixedRouteProbe {
     this.port, {
     this.timeout = const Duration(seconds: 5),
     List<Uri>? exitSources,
+    this.credentials,
   }) : exitSources =
            exitSources ??
            [
@@ -41,6 +42,7 @@ class FixedRouteProbe {
   final int port;
   final Duration timeout;
   final List<Uri> exitSources;
+  final ({String username, String password})? credentials;
   final _clients = <HttpClient>{};
   bool _cancelled = false;
 
@@ -62,6 +64,17 @@ class FixedRouteProbe {
     final client = HttpClient()
       ..connectionTimeout = timeout
       ..findProxy = (_) => 'PROXY 127.0.0.1:$port';
+    if (credentials case final creds?) {
+      final basic = HttpClientBasicCredentials(creds.username, creds.password);
+      var challenged = false;
+      client.addProxyCredentials('127.0.0.1', port, '', basic);
+      client.authenticateProxy = (host, p, scheme, realm) async {
+        if (challenged) return false;
+        challenged = true;
+        client.addProxyCredentials(host, p, realm ?? '', basic);
+        return true;
+      };
+    }
     _clients.add(client);
     try {
       return await (() async {

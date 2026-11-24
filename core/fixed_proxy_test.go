@@ -169,3 +169,107 @@ listeners:
 		t.Fatalf("recovered listener still unavailable: %v", status)
 	}
 }
+
+func TestInvalidFixedRouteIsIsolatedAndPortHandoffSucceeds(t *testing.T) {
+	previous, running := currentConfig, isRunning
+	proxies, providers, mode := tunnel.Proxies(), tunnel.Providers(), tunnel.Mode()
+	status := tunnel.Status()
+	allowed, denied, skip := inbound.AllowedIPs(), inbound.DisAllowedIPs(), inbound.SkipAuthPrefixes()
+	t.Cleanup(func() {
+		handleStopListener()
+		currentConfig, isRunning = previous, running
+		tunnel.UpdateProxies(proxies, providers)
+		tunnel.UpdatePrivateProxies(nil)
+		tunnel.SetMode(mode)
+		inbound.SetAllowedIPs(allowed)
+		inbound.SetDisAllowedIPs(denied)
+		inbound.SetSkipAuthPrefixes(skip)
+		switch status {
+		case tunnel.Running:
+			tunnel.OnRunning()
+		case tunnel.Inner:
+			tunnel.OnInnerLoading()
+		default:
+			tunnel.OnSuspend()
+		}
+	})
+
+	origin := httptest.NewTLSServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		w.WriteHeader(http.StatusNoContent)
+	}))
+	defer origin.Close()
+	exitPort, _ := fixedTestHop(t, origin.Listener.Addr().String())
+	ports := make([]int, 3)
+	var reserved []net.Listener
+	for i := range ports {
+		sock, err := net.Listen("tcp", "127.0.0.1:0")
+		if err != nil {
+			t.Fatal(err)
+		}
+		reserved = append(reserved, sock)
+		ports[i] = sock.Addr().(*net.TCPAddr).Port
+	}
+	for _, sock := range reserved {
+		sock.Close()
+	}
+
+	// Start with a non-fixed custom listener holding ports[1], plus one healthy
+	// fixed route and one broken private fixed route.
+	rawA := fmt.Sprintf(`mixed-port: %d
+mode: global
+proxies:
+  - {name: fluxora-fixed-good-hop-1, type: http, server: 127.0.0.1, port: %d, fluxora-private: true}
+  - {name: fluxora-fixed-bad-hop-1, type: vless, server: 127.0.0.1, port: 443, uuid: not-a-uuid, fluxora-private: true}
+  - {name: fluxora-fixed-bad-hop-2, type: http, server: 127.0.0.1, port: %d, dialer-proxy: fluxora-fixed-bad-hop-1, fluxora-private: true}
+listeners:
+  - {name: custom-legacy, type: mixed, listen: 127.0.0.1, port: %d, proxy: DIRECT}
+  - {name: fluxora-fixed-good, type: mixed, listen: 127.0.0.1, port: %d, proxy: fluxora-fixed-good-hop-1}
+  - {name: fluxora-fixed-bad, type: mixed, listen: 127.0.0.1, port: %d, proxy: fluxora-fixed-bad-hop-2}
+`, ports[0], exitPort, exitPort, ports[1], ports[2], ports[1])
+
+	cfgA, err := config.Parse([]byte(rawA))
+	if err != nil {
+		t.Fatalf("broken private fixed route failed main config parse: %v", err)
+	}
+	currentConfig = cfgA
+	tunnel.UpdateProxies(cfgA.Proxies, cfgA.Providers)
+	tunnel.UpdatePrivateProxies(cfgA.PrivateProxies)
+	tunnel.SetMode(tunnel.Global)
+	tunnel.OnRunning()
+	if !handleStartListener() {
+		t.Fatal("core failed to start with isolated broken fixed route")
+	}
+	if !tunnel.IsPrivateProxy("fluxora-fixed-good-hop-1") {
+		t.Fatal("private fixed hop was not tracked in tunnel.IsPrivateProxy")
+	}
+	st := fixedListenerStatus()
+	if st["fluxora-fixed-good"] != "" {
+		t.Fatalf("healthy fixed listener failed: %v", st)
+	}
+	if st["fluxora-fixed-bad"] == "" {
+		t.Fatalf("broken fixed listener did not report parse error: %v", st)
+	}
+
+	// Switch to a config where custom-legacy is dropped and fluxora-fixed-handoff
+	// takes over ports[1]. dropOld must release ports[1] before binding the new listener.
+	rawB := fmt.Sprintf(`mixed-port: %d
+mode: global
+proxies:
+  - {name: fluxora-fixed-handoff-hop-1, type: http, server: 127.0.0.1, port: %d, fluxora-private: true}
+listeners:
+  - {name: fluxora-fixed-handoff, type: mixed, listen: 127.0.0.1, port: %d, proxy: fluxora-fixed-handoff-hop-1}
+`, ports[0], exitPort, ports[1])
+	cfgB, err := config.Parse([]byte(rawB))
+	if err != nil {
+		t.Fatal(err)
+	}
+	currentConfig = cfgB
+	tunnel.UpdateProxies(cfgB.Proxies, cfgB.Providers)
+	tunnel.UpdatePrivateProxies(cfgB.PrivateProxies)
+	if err := updateListeners(); err != nil {
+		t.Fatalf("updateListeners failed on handoff: %v", err)
+	}
+	if st := fixedListenerStatus(); len(st) != 1 || st["fluxora-fixed-handoff"] != "" {
+		t.Fatalf("port handoff from removed listener failed: %v", st)
+	}
+}

@@ -204,9 +204,11 @@ type Config struct {
 	Rules         []C.Rule
 	SubRules      map[string][]C.Rule
 	Users         []auth.AuthUser
-	Proxies       map[string]C.Proxy
-	Listeners     map[string]C.InboundListener
-	Providers     map[string]P.ProxyProvider
+	Proxies        map[string]C.Proxy
+	PrivateProxies map[string]struct{}
+	Listeners      map[string]C.InboundListener
+	ListenerErrors map[string]error
+	Providers      map[string]P.ProxyProvider
 	RuleProviders map[string]P.RuleProvider
 	Tunnels       []LC.Tunnel
 	Sniffer       *sniffer.Config
@@ -674,18 +676,20 @@ func ParseRawConfig(rawCfg *RawConfig) (*Config, error) {
 	}
 	config.TLS = tlsCfg
 
-	proxies, providers, err := parseProxies(rawCfg)
+	proxies, providers, privateProxies, privateErrors, err := parseProxiesWithPrivate(rawCfg)
 	if err != nil {
 		return nil, err
 	}
 	config.Proxies = proxies
+	config.PrivateProxies = privateProxies
 	config.Providers = providers
 
-	listeners, err := parseListeners(rawCfg)
+	listeners, listenerErrors, err := parseListenersWithErrors(rawCfg, proxies, privateErrors)
 	if err != nil {
 		return nil, err
 	}
 	config.Listeners = listeners
+	config.ListenerErrors = listenerErrors
 
 	log.Infoln("Geodata Loader mode: %s", geodata.LoaderName())
 	log.Infoln("Geosite Matcher implementation: %s", geodata.SiteMatcherName())
@@ -877,8 +881,21 @@ func parseTLS(cfg *RawConfig) (*TLS, error) {
 }
 
 func parseProxies(cfg *RawConfig) (proxies map[string]C.Proxy, providersMap map[string]P.ProxyProvider, err error) {
+	proxies, providersMap, _, _, err = parseProxiesWithPrivate(cfg)
+	return
+}
+
+func parseProxiesWithPrivate(cfg *RawConfig) (
+	proxies map[string]C.Proxy,
+	providersMap map[string]P.ProxyProvider,
+	privateProxies map[string]struct{},
+	privateErrors map[string]error,
+	err error,
+) {
 	proxies = make(map[string]C.Proxy)
 	providersMap = make(map[string]P.ProxyProvider)
+	privateProxies = make(map[string]struct{})
+	privateErrors = make(map[string]error)
 	proxiesConfig := cfg.Proxy
 	groupsConfig := cfg.ProxyGroup
 	providersConfig := cfg.ProxyProvider
@@ -899,18 +916,32 @@ func parseProxies(cfg *RawConfig) (proxies map[string]C.Proxy, providersMap map[
 
 	// parse proxy
 	for idx, mapping := range proxiesConfig {
-		proxy, err := adapter.ParseProxy(mapping, adapter.WithTunnelForAPI(T.Tunnel))
-		if err != nil {
-			return nil, nil, fmt.Errorf("proxy %d: %w", idx, err)
+		private, _ := mapping["fluxora-private"].(bool)
+		proxy, parseErr := adapter.ParseProxy(mapping, adapter.WithTunnelForAPI(T.Tunnel))
+		if parseErr != nil {
+			if private {
+				if name, _ := mapping["name"].(string); name != "" {
+					privateErrors[name] = parseErr
+				}
+				log.Warnln("Skip invalid private proxy %d: %s", idx, parseErr.Error())
+				continue
+			}
+			return nil, nil, nil, nil, fmt.Errorf("proxy %d: %w", idx, parseErr)
 		}
 
 		if _, exist := proxies[proxy.Name()]; exist {
-			return nil, nil, fmt.Errorf("proxy %s is the duplicate name", proxy.Name())
+			dupErr := fmt.Errorf("proxy %s is the duplicate name", proxy.Name())
+			if private {
+				privateErrors[proxy.Name()] = dupErr
+				continue
+			}
+			return nil, nil, nil, nil, dupErr
 		}
 		proxies[proxy.Name()] = proxy
 		// Fixed-port hops are addressable by listeners and dialers only.
 		// Keep them out of implicit GLOBAL and include-all group membership.
-		if private, _ := mapping["fluxora-private"].(bool); private {
+		if private {
+			privateProxies[proxy.Name()] = struct{}{}
 			continue
 		}
 		proxyList = append(proxyList, proxy.Name())
@@ -921,7 +952,7 @@ func parseProxies(cfg *RawConfig) (proxies map[string]C.Proxy, providersMap map[
 	for idx, mapping := range groupsConfig {
 		groupName, existName := mapping["name"].(string)
 		if !existName {
-			return nil, nil, fmt.Errorf("proxy group %d: missing name", idx)
+			return nil, nil, nil, nil, fmt.Errorf("proxy group %d: missing name", idx)
 		}
 		if groupName == "GLOBAL" {
 			hasGlobal = true
@@ -931,19 +962,19 @@ func parseProxies(cfg *RawConfig) (proxies map[string]C.Proxy, providersMap map[
 
 	// check if any loop exists and sort the ProxyGroups
 	if err := proxyGroupsDagSort(groupsConfig); err != nil {
-		return nil, nil, err
+		return nil, nil, nil, nil, err
 	}
 
 	var AllProviders []string
 	// parse and initial providers
 	for name, mapping := range providersConfig {
 		if name == provider.ReservedName {
-			return nil, nil, fmt.Errorf("can not defined a provider called `%s`", provider.ReservedName)
+			return nil, nil, nil, nil, fmt.Errorf("can not defined a provider called `%s`", provider.ReservedName)
 		}
 
 		pd, err := provider.ParseProxyProvider(name, mapping, T.Tunnel)
 		if err != nil {
-			return nil, nil, fmt.Errorf("parse proxy provider %s error: %w", name, err)
+			return nil, nil, nil, nil, fmt.Errorf("parse proxy provider %s error: %w", name, err)
 		}
 
 		providersMap[name] = pd
@@ -957,12 +988,12 @@ func parseProxies(cfg *RawConfig) (proxies map[string]C.Proxy, providersMap map[
 	for idx, mapping := range groupsConfig {
 		group, err := outboundgroup.ParseProxyGroup(mapping, proxies, providersMap, AllProxies, AllProviders)
 		if err != nil {
-			return nil, nil, fmt.Errorf("proxy group[%d]: %w", idx, err)
+			return nil, nil, nil, nil, fmt.Errorf("proxy group[%d]: %w", idx, err)
 		}
 
 		groupName := group.Name()
 		if _, exist := proxies[groupName]; exist {
-			return nil, nil, fmt.Errorf("proxy group %s: the duplicate name", groupName)
+			return nil, nil, nil, nil, fmt.Errorf("proxy group %s: the duplicate name", groupName)
 		}
 
 		proxies[groupName] = adapter.NewProxy(group)
@@ -989,34 +1020,123 @@ func parseProxies(cfg *RawConfig) (proxies map[string]C.Proxy, providersMap map[
 			[]P.ProxyProvider{pd},
 		)
 		if err != nil {
-			return nil, nil, fmt.Errorf("new GLOBAL proxy group error: %w", err)
+			return nil, nil, nil, nil, fmt.Errorf("new GLOBAL proxy group error: %w", err)
 		}
 		proxies["GLOBAL"] = adapter.NewProxy(global)
 	}
 
+	// Isolate broken private fixed-route chains before validating main proxies so
+	// one invalid fixed route never prevents the main profile from loading.
+	pruneInvalidPrivateProxies(proxies, privateProxies, privateErrors)
+
 	// validate dialer-proxy references
 	if err := validateDialerProxies(proxies); err != nil {
-		return nil, nil, err
+		return nil, nil, nil, nil, err
 	}
 
-	return proxies, providersMap, nil
+	return proxies, providersMap, privateProxies, privateErrors, nil
+}
+
+func pruneInvalidPrivateProxies(
+	proxies map[string]C.Proxy,
+	privateProxies map[string]struct{},
+	privateErrors map[string]error,
+) {
+	for {
+		changed := false
+		for name := range privateProxies {
+			p := proxies[name]
+			if p == nil {
+				delete(privateProxies, name)
+				continue
+			}
+			dp := p.ProxyInfo().DialerProxy
+			if dp != "" {
+				if _, ok := proxies[dp]; !ok {
+					if rootErr, has := privateErrors[dp]; has {
+						privateErrors[name] = rootErr
+					} else {
+						privateErrors[name] = fmt.Errorf("proxy [%s] dialer-proxy [%s] not found", name, dp)
+					}
+					delete(proxies, name)
+					delete(privateProxies, name)
+					changed = true
+					continue
+				}
+			}
+			visited := map[string]struct{}{name: {}}
+			for cur := dp; cur != ""; {
+				if _, seen := visited[cur]; seen {
+					privateErrors[name] = fmt.Errorf("proxy [%s] has circular dialer-proxy dependency", name)
+					delete(proxies, name)
+					delete(privateProxies, name)
+					changed = true
+					break
+				}
+				visited[cur] = struct{}{}
+				next := proxies[cur]
+				if next == nil {
+					break
+				}
+				cur = next.ProxyInfo().DialerProxy
+			}
+		}
+		if !changed {
+			break
+		}
+	}
 }
 
 func parseListeners(cfg *RawConfig) (listeners map[string]C.InboundListener, err error) {
+	listeners, _, err = parseListenersWithErrors(cfg, nil, nil)
+	return
+}
+
+func parseListenersWithErrors(
+	cfg *RawConfig,
+	proxies map[string]C.Proxy,
+	privateErrors map[string]error,
+) (listeners map[string]C.InboundListener, listenerErrors map[string]error, err error) {
 	listeners = make(map[string]C.InboundListener)
+	listenerErrors = make(map[string]error)
 	for index, mapping := range cfg.Listeners {
-		inboundListener, err := listener.ParseListener(mapping)
-		if err != nil {
-			return nil, fmt.Errorf("listener %d: %w", index, err)
+		rawName, _ := mapping["name"].(string)
+		isFixed := strings.HasPrefix(rawName, "fluxora-fixed-")
+		if isFixed {
+			if proxyName, _ := mapping["proxy"].(string); proxyName != "" {
+				if pErr, failed := privateErrors[proxyName]; failed {
+					listenerErrors[rawName] = pErr
+					continue
+				}
+				if proxies != nil {
+					if _, ok := proxies[proxyName]; !ok {
+						listenerErrors[rawName] = fmt.Errorf("proxy %s not found", proxyName)
+						continue
+					}
+				}
+			}
+		}
+
+		inboundListener, parseErr := listener.ParseListener(mapping)
+		if parseErr != nil {
+			if isFixed {
+				listenerErrors[rawName] = parseErr
+				continue
+			}
+			return nil, nil, fmt.Errorf("listener %d: %w", index, parseErr)
 		}
 
 		name := inboundListener.Name()
 		if _, exist := listeners[name]; exist {
-			return nil, fmt.Errorf("listener %s is the duplicate name", name)
+			dupErr := fmt.Errorf("listener %s is the duplicate name", name)
+			if isFixed {
+				listenerErrors[name] = dupErr
+				continue
+			}
+			return nil, nil, dupErr
 		}
 
 		listeners[name] = inboundListener
-
 	}
 	return
 }

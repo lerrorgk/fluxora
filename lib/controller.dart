@@ -699,6 +699,7 @@ class AppController {
         await providersDir.delete(recursive: true);
       }
     }
+    final affectsFixed = fixedProxyRoutes.usesSource(id);
     if (globalState.config.currentProfileId == id) {
       final profiles = globalState.config.profiles;
       final currentProfileId = _ref.read(currentProfileIdProvider.notifier);
@@ -709,6 +710,8 @@ class AppController {
         currentProfileId.value = null;
         updateStatus(false);
       }
+    } else if (affectsFixed && globalState.config.currentProfileId != null) {
+      applyProfileDebounce(silence: true);
     }
   }
 
@@ -814,7 +817,9 @@ class AppController {
               isUpdating: false,
             ),
           );
-      if (applyAfterUpdate && id == _ref.read(currentProfileIdProvider)) {
+      if (applyAfterUpdate &&
+          (id == _ref.read(currentProfileIdProvider) ||
+              fixedProxyRoutes.usesSource(id))) {
         applyProfileDebounce(silence: true);
       }
     } catch (_) {
@@ -839,7 +844,8 @@ class AppController {
     final current = _ref.read(profilesProvider).getProfile(id);
     if (current == null) return;
     _ref.read(profilesProvider.notifier).setProfile(edit(current));
-    if (id == _ref.read(currentProfileIdProvider)) {
+    if (id == _ref.read(currentProfileIdProvider) ||
+        fixedProxyRoutes.usesSource(id)) {
       applyProfileDebounce(silence: true);
     }
   }
@@ -3300,7 +3306,10 @@ class AppController {
         await profileChainManager.reload();
       }
       if (archive.find('warp_config.json') != null) await warpManager.reload();
-      if (archive.find('fixed_proxy_routes.json') != null) {
+      final overwrite =
+          _ref.read(appSettingProvider).recoveryStrategy ==
+          RecoveryStrategy.override;
+      if (archive.find('fixed_proxy_routes.json') != null || overwrite) {
         await fixedProxyRoutes.reload();
       }
     }

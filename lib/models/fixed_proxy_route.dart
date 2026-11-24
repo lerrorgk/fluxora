@@ -39,12 +39,46 @@ class FixedProxyRoute {
 
   String get listener => 'fluxora-fixed-$port';
 
+  /// Upstream subscription dialer hops required by the first explicit hop,
+  /// ordered from outermost entry to immediate dialer.
+  ({List<FixedHop> dialers, String? error}) resolveDialers(
+    Map<FixedHop, Map> nodes,
+  ) {
+    if (hops.isEmpty) return (dialers: const [], error: 'Invalid route');
+    final dialers = <FixedHop>{};
+    var entry = hops.first;
+    while (entry.source.isNotEmpty) {
+      final raw = nodes[entry]?['dialer-proxy'];
+      final dialer = raw?.toString().trim() ?? '';
+      if (dialer.isEmpty || dialer == 'DIRECT') {
+        break;
+      }
+      final upstream = (source: entry.source, node: dialer);
+      if (!nodes.containsKey(upstream)) {
+        return (
+          dialers: const [],
+          error:
+              'Dialer "$dialer" for "${entry.node}" is not a node in its subscription',
+        );
+      }
+      if (upstream == hops.first || !dialers.add(upstream)) {
+        return (
+          dialers: const [],
+          error: 'Circular dialer dependency: $dialer',
+        );
+      }
+      entry = upstream;
+    }
+    return (dialers: dialers.toList().reversed.toList(), error: null);
+  }
+
   /// Add the whole route or none of it. Missing hops never fall through to
   /// the main selector. Original proxy objects are left untouched.
   String? attach(Map<String, dynamic> config, Map<FixedHop, Map> nodes) {
     if (!enabled) return null;
     if (port < 1 || port > 65535 || hops.isEmpty) return 'Invalid route';
     final listeners = (config['listeners'] as List?) ?? const [];
+    final tunnels = (config['tunnels'] as List?) ?? const [];
     final occupied = [
       for (final key in [
         'port',
@@ -56,9 +90,10 @@ class FixedProxyRoute {
         config[key],
       for (final key in ['external-controller', 'external-controller-tls'])
         config[key]?.toString().split(':').last,
-      if (config['dns'] is Map)
+      if (config['dns'] is Map && config['dns']['enable'] != false)
         config['dns']['listen']?.toString().split(':').last,
       for (final inbound in listeners.whereType<Map>()) inbound['port'],
+      for (final tunnel in tunnels) _tunnelPort(tunnel),
     ];
     if (occupied.any(_includesPort)) return 'Port $port is already in use';
     if (listeners.whereType<Map>().any((l) => l['name'] == listener)) {
@@ -75,27 +110,10 @@ class FixedProxyRoute {
     // The first subscription node may itself need a specific upstream to
     // reach its server. Pin those nodes from the same subscription as well.
     // Later explicit hops use the preceding hop chosen in the route editor.
-    final dialers = <FixedHop>{};
-    var entry = hops.first;
-    while (entry.source.isNotEmpty) {
-      final dialer = nodes[entry]?['dialer-proxy'];
-      if (dialer == null ||
-          dialer == '' ||
-          dialer == 'DIRECT' ||
-          dialer == 'GLOBAL') {
-        break;
-      }
-      final upstream = (source: entry.source, node: dialer.toString());
-      if (!nodes.containsKey(upstream)) {
-        return 'Dialer "$dialer" for "${entry.node}" is not a node in its subscription';
-      }
-      if (upstream == hops.first || !dialers.add(upstream)) {
-        return 'Circular dialer dependency: $dialer';
-      }
-      entry = upstream;
-    }
+    final resolved = resolveDialers(nodes);
+    if (resolved.error != null) return resolved.error;
     final copies = <Map<String, dynamic>>[];
-    for (final hop in [...dialers.toList().reversed, ...hops]) {
+    for (final hop in [...resolved.dialers, ...hops]) {
       final node = nodes[hop];
       if (node == null) return 'Node unavailable: ${hop.node}';
       final name = '$listener-hop-${copies.length + 1}';
@@ -119,6 +137,19 @@ class FixedProxyRoute {
         'udp': copies.every((p) => p['udp'] != false),
       },
     ];
+    return null;
+  }
+
+  Object? _tunnelPort(Object? tunnel) {
+    if (tunnel is Map) {
+      return tunnel['address']?.toString().split(':').last;
+    }
+    if (tunnel is String) {
+      final parts = tunnel.split(',');
+      if (parts.length >= 2) {
+        return parts[1].trim().split(':').last;
+      }
+    }
     return null;
   }
 

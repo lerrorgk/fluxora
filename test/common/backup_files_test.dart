@@ -97,6 +97,20 @@ void main() {
         await File(p.join(home.path, 'profiles', 'a.yml')).exists(),
         isFalse,
       );
+      final fixedRoutes = File(p.join(home.path, 'fixed_proxy_routes.json'));
+      await fixedRoutes.writeAsString(
+        '{"version":1,"routes":[{"port":20001,"hops":[{"source":"old","node":"n"}]}]}',
+      );
+      await restoreBackupFiles(
+        manifest.entriesForRestore(snapshot, all: true, overwrite: false),
+        home.path,
+      );
+      expect(await fixedRoutes.readAsString(), contains('20001'));
+      await restoreBackupFiles(
+        manifest.entriesForRestore(snapshot, all: true, overwrite: true),
+        home.path,
+      );
+      expect(await fixedRoutes.readAsString(), '{"version":1,"routes":[]}');
       snapshot.add(ArchiveFile.string('profiles/a.yaml', 'conflicting'));
       await expectLater(restore(true), throwsFormatException);
       expect(await canonical.readAsString(), 'original');

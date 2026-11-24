@@ -131,12 +131,12 @@ func updateListeners() error {
 	}
 	listeners := currentConfig.Listeners
 	general := currentConfig.General
-	inboundFailures = listener.PatchInboundListeners(listeners, tunnel.Tunnel, true)
 	listener.SetAllowLan(general.AllowLan)
 	inbound.SetSkipAuthPrefixes(general.SkipAuthPrefixes)
 	inbound.SetAllowedIPs(general.LanAllowedIPs)
 	inbound.SetDisAllowedIPs(general.LanDisAllowedIPs)
 	listener.SetBindAddress(general.BindAddress)
+	inboundFailures = listener.PatchInboundListeners(listeners, tunnel.Tunnel, true)
 	listener.ReCreateHTTP(general.Port, tunnel.Tunnel)
 	listener.ReCreateSocks(general.SocksPort, tunnel.Tunnel)
 	listener.ReCreateRedir(general.RedirPort, tunnel.Tunnel)
@@ -166,6 +166,11 @@ func fixedListenerStatus() map[string]string {
 	status := map[string]string{}
 	if !isRunning || currentConfig == nil {
 		return status
+	}
+	for name, err := range currentConfig.ListenerErrors {
+		if strings.HasPrefix(name, "fluxora-fixed-") && err != nil {
+			status[name] = err.Error()
+		}
 	}
 	for name, expected := range currentConfig.Listeners {
 		if !strings.HasPrefix(name, "fluxora-fixed-") {

@@ -660,7 +660,7 @@ func handleGetCoreStatus(fn func(value string)) {
 		var proxyGroupsCount int
 		proxyNames := make(map[string]struct{})
 		for _, p := range tunnel.Proxies() {
-			if p == nil {
+			if p == nil || tunnel.IsPrivateProxy(p.Name()) {
 				continue
 			}
 			if _, ok := p.Adapter().(outboundgroup.ProxyGroup); ok {

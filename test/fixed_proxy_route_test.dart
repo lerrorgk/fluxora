@@ -1,9 +1,57 @@
 import 'dart:convert';
+import 'dart:io';
 
+import 'package:fluxora/manager/chain_proxy_manager.dart';
+import 'package:fluxora/manager/fixed_proxy_routes.dart';
+import 'package:fluxora/models/chain_proxy.dart';
+import 'package:fluxora/models/clash_config.dart';
+import 'package:fluxora/models/config.dart';
 import 'package:fluxora/models/fixed_proxy_route.dart';
+import 'package:fluxora/models/profile.dart';
+import 'package:fluxora/state.dart';
 import 'package:flutter_test/flutter_test.dart';
+// ignore: depend_on_referenced_packages
+import 'package:path_provider_platform_interface/path_provider_platform_interface.dart';
+// ignore: depend_on_referenced_packages
+import 'package:plugin_platform_interface/plugin_platform_interface.dart';
+
+class _FakePathProviderPlatform extends Fake
+    with MockPlatformInterfaceMixin
+    implements PathProviderPlatform {
+  _FakePathProviderPlatform(this.dir);
+  final Directory dir;
+  @override
+  Future<String?> getTemporaryPath() async => dir.path;
+  @override
+  Future<String?> getApplicationSupportPath() async => dir.path;
+  @override
+  Future<String?> getLibraryPath() async => dir.path;
+  @override
+  Future<String?> getApplicationDocumentsPath() async => dir.path;
+  @override
+  Future<String?> getExternalStoragePath() async => dir.path;
+  @override
+  Future<List<String>?> getExternalCachePaths() async => [dir.path];
+  @override
+  Future<List<String>?> getExternalStoragePaths({
+    StorageDirectory? type,
+  }) async => [dir.path];
+  @override
+  Future<String?> getDownloadsPath() async => dir.path;
+}
 
 void main() {
+  TestWidgetsFlutterBinding.ensureInitialized();
+  late Directory sandbox;
+  setUpAll(() {
+    sandbox = Directory.systemTemp.createTempSync('fluxora_fixed_route_test_');
+    PathProviderPlatform.instance = _FakePathProviderPlatform(sandbox);
+  });
+  tearDownAll(() async {
+    try {
+      await sandbox.delete(recursive: true);
+    } catch (_) {}
+  });
   const front = (source: 'sub-A', node: 'Tokyo');
   const exit = (source: '', node: 'residential');
   final nodes = {
@@ -11,9 +59,14 @@ void main() {
       'name': 'Tokyo',
       'type': 'http',
       'server': 'front',
+      'dialer-proxy': 'DIRECT',
+    },
+    exit: {
+      'name': 'exit',
+      'type': 'socks5',
+      'server': 'exit',
       'dialer-proxy': 'GLOBAL',
     },
-    exit: {'name': 'exit', 'type': 'socks5', 'server': 'exit'},
   };
 
   test(
@@ -66,7 +119,8 @@ void main() {
       expect(listeners[0]['proxy'], proxies[0]['name']);
       expect(listeners[1]['proxy'], proxies[2]['name']);
       expect(listeners.every((l) => l['listen'] == '127.0.0.1'), isTrue);
-      expect(nodes[front]!['dialer-proxy'], 'GLOBAL');
+      expect(nodes[front]!['dialer-proxy'], 'DIRECT');
+      expect(nodes[exit]!['dialer-proxy'], 'GLOBAL');
       expect(config['rules'], ['MATCH,main']);
     },
   );
@@ -120,6 +174,9 @@ void main() {
     catalog[gateway] = {'name': 'bridge', 'dialer-proxy': 'Tokyo'};
     expect(route.attach(config, catalog), contains('Circular'));
     expect(config, isEmpty);
+    catalog[front] = {...nodes[front]!, 'dialer-proxy': 'GLOBAL'};
+    expect(route.attach(config, catalog), contains('GLOBAL'));
+    expect(config, isEmpty);
   });
 
   test(
@@ -141,6 +198,14 @@ void main() {
         'dns': {'listen': '127.0.0.1:25001'},
       },
       {
+        'tunnels': [
+          {'address': '127.0.0.1:25001', 'target': '1.1.1.1:53'},
+        ],
+      },
+      {
+        'tunnels': ['tcp/udp,127.0.0.1:25001,1.1.1.1:53,DIRECT'],
+      },
+      {
         'listeners': [
           {'port': '25000-25005,26000'},
         ],
@@ -160,4 +225,121 @@ void main() {
       expect(jsonEncode(config), before);
     }
   });
+
+  test(
+    'stopped preview rejects DNS/controller ports, snippet errors and clears stale issues',
+    () async {
+      globalState.startTime = null;
+      globalState.config = Config(
+        themeProps: defaultThemeProps,
+        patchClashConfig: const ClashConfig(
+          dns: Dns(enable: true, listen: '0.0.0.0:10053'),
+        ),
+      );
+      const landing = LandingProxy(
+        id: 'test-landing',
+        name: 'Landing',
+        server: '127.0.0.1',
+        port: 1080,
+      );
+      await chainProxyManager.updateConfig(
+        (c) => c.copyWith(landingProxies: [landing]),
+        reloadCore: false,
+      );
+      const hop = (source: '', node: 'test-landing');
+      final manager = FixedProxyRoutes(validateSnippet: (_) async => '');
+
+      await expectLater(
+        manager.change(route: const FixedProxyRoute(10053, [hop])),
+        throwsA(isA<StateError>()),
+      );
+      await expectLater(
+        manager.change(route: const FixedProxyRoute(9090, [hop])),
+        throwsA(isA<StateError>()),
+      );
+
+      final sock = await ServerSocket.bind(InternetAddress.loopbackIPv4, 0);
+      final freePort = sock.port;
+      await sock.close();
+
+      final rejecting = FixedProxyRoutes(
+        validateSnippet: (_) async => 'proxy 0: invalid uuid',
+      );
+      await expectLater(
+        rejecting.change(route: FixedProxyRoute(freePort, [hop])),
+        throwsA(
+          isA<StateError>().having(
+            (e) => e.message,
+            'message',
+            contains('invalid uuid'),
+          ),
+        ),
+      );
+
+      manager.issues[freePort] = 'Node unavailable: stale';
+      await manager.change(route: FixedProxyRoute(freePort, [hop]));
+      expect(manager.issueFor(freePort), isNull);
+      expect(manager.usesSource('sub-A'), isFalse);
+
+      await manager.change(
+        previousPort: freePort,
+        route: FixedProxyRoute(freePort, [const (source: 'sub-A', node: 'X')], enabled: false),
+      );
+      expect(manager.usesSource('sub-A'), isFalse);
+      await manager.change(previousPort: freePort);
+    },
+  );
+
+  test(
+    'catalog normalizes fingerprint/short-id and includes peers WireGuard and inline providers',
+    () async {
+      globalState.config = Config(
+        themeProps: defaultThemeProps,
+        profiles: [Profile(id: 'sub-1', autoUpdateDuration: Duration.zero)],
+      );
+      final manager = FixedProxyRoutes(
+        readProfile: (_) async => {
+          'global-client-fingerprint': 'chrome',
+          'proxies': [
+            {
+              'name': 'vless-reality',
+              'type': 'vless',
+              'server': 'example.com',
+              'port': 443,
+              'tls': true,
+              'reality-opts': {'short-id': 123456},
+            },
+            {
+              'name': 'wg-peers',
+              'type': 'wireguard',
+              'peers': [
+                {'server': '198.51.100.1', 'port': 51820},
+              ],
+            },
+          ],
+          'proxy-providers': {
+            'inline-set': {
+              'type': 'inline',
+              'override': {'additional-prefix': '[P] '},
+              'payload': [
+                {
+                  'name': 'trojan-1',
+                  'type': 'trojan',
+                  'server': 'provider.example',
+                  'port': 443,
+                },
+              ],
+            },
+          },
+        },
+      );
+      final nodes = await manager.catalog(sources: {'sub-1'});
+      final vless = nodes[(source: 'sub-1', node: 'vless-reality')]!;
+      expect(vless['client-fingerprint'], 'chrome');
+      expect((vless['reality-opts'] as Map)['short-id'], '123456');
+      expect(nodes[(source: 'sub-1', node: 'wg-peers')], isNotNull);
+      final trojan = nodes[(source: 'sub-1', node: '[P] trojan-1')]!;
+      expect(trojan['client-fingerprint'], 'chrome');
+    },
+  );
 }

@@ -112,15 +112,25 @@ class FluxoraBackupFiles {
       if (overwrite)
         for (final id in profileIds) 'manual_proxies_$id.json',
     };
+    var hasFixedRoutes = false;
     for (final entry in archive.files) {
       final name = entry.name.replaceAll('\\', '/');
       if (!entry.isFile || !includes(name, all: all)) continue;
       missing.remove(name);
+      if (name == 'fixed_proxy_routes.json') hasFixedRoutes = true;
       yield entry;
     }
     // Older snapshots omit the sidecar for a profile with no manual nodes.
     for (final name in missing) {
       yield ArchiveFile.string(name, '[]');
+    }
+    // Older full backups predate fixed_proxy_routes.json; overwrite clears
+    // local routes so stale references to replaced profiles are not retained.
+    if (all && overwrite && !hasFixedRoutes) {
+      yield ArchiveFile.string(
+        'fixed_proxy_routes.json',
+        '{"version":1,"routes":[]}',
+      );
     }
   }
 

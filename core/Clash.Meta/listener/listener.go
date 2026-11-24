@@ -650,15 +650,26 @@ func PatchInboundListeners(newListenerMap map[string]C.InboundListener, tunnel C
 	inboundMux.Lock()
 	defer inboundMux.Unlock()
 
-	var failures map[string]error
-	for name, newListener := range newListenerMap {
-		if oldListener, ok := inboundListeners[name]; ok {
-			if !oldListener.Config().Equal(newListener.Config()) {
+	if dropOld {
+		for name, oldListener := range inboundListeners {
+			if _, ok := newListenerMap[name]; !ok {
 				_ = oldListener.Close()
 				delete(inboundListeners, name)
-			} else {
-				continue
 			}
+		}
+	}
+
+	for name, newListener := range newListenerMap {
+		if oldListener, ok := inboundListeners[name]; ok && !oldListener.Config().Equal(newListener.Config()) {
+			_ = oldListener.Close()
+			delete(inboundListeners, name)
+		}
+	}
+
+	var failures map[string]error
+	for name, newListener := range newListenerMap {
+		if _, ok := inboundListeners[name]; ok {
+			continue
 		}
 		if err := newListener.Listen(tunnel); err != nil {
 			if failures == nil {
@@ -671,14 +682,6 @@ func PatchInboundListeners(newListenerMap map[string]C.InboundListener, tunnel C
 		inboundListeners[name] = newListener
 	}
 
-	if dropOld {
-		for name, oldListener := range inboundListeners {
-			if _, ok := newListenerMap[name]; !ok {
-				_ = oldListener.Close()
-				delete(inboundListeners, name)
-			}
-		}
-	}
 	return failures
 }
 
