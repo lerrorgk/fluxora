@@ -287,10 +287,6 @@ class _RenderSideSheetLayoutWithSizeListener extends RenderShiftedBox {
     return _getSize(constraints);
   }
 
-  BoxConstraints _getConstraintsForChild(BoxConstraints constraints) {
-    return BoxConstraints(maxHeight: constraints.maxHeight);
-  }
-
   Offset _getPositionForChild(Size size, Size childSize) {
     return Offset(size.width - childSize.width * animationValue, 0.0);
   }
@@ -299,9 +295,7 @@ class _RenderSideSheetLayoutWithSizeListener extends RenderShiftedBox {
   void performLayout() {
     size = _getSize(constraints);
     if (child != null) {
-      final BoxConstraints childConstraints = _getConstraintsForChild(
-        constraints,
-      );
+      final BoxConstraints childConstraints = constraints.loosen();
       assert(childConstraints.debugAssertIsValid(isAppliedConstraint: true));
       child!.layout(
         childConstraints,

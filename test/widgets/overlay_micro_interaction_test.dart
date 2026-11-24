@@ -198,6 +198,36 @@ void main() {
   });
 
   group('side sheet', () {
+    testWidgets('a wide panel fits its navigator after a resize', (
+      tester,
+    ) async {
+      final trigger = FocusNode();
+      addTearDown(trigger.dispose);
+      const panel = Key('panel');
+      await pumpHost(
+        tester,
+        triggerNode: trigger,
+        open: (context) => showModalSideSheet<void>(
+          context: context,
+          constraints: const BoxConstraints(maxWidth: 820),
+          builder: (_) => const SizedBox.expand(key: panel),
+        ),
+      );
+      await tester.tap(find.text('open'));
+      await tester.pumpAndSettle();
+      expect(
+        tester.getRect(find.byKey(panel)),
+        const Rect.fromLTWH(180, 0, 820, 800),
+      );
+
+      tester.view.physicalSize = const Size(640, 640);
+      await tester.pumpAndSettle();
+      expect(
+        tester.getRect(find.byKey(panel)),
+        const Rect.fromLTWH(0, 0, 640, 640),
+      );
+    });
+
     testWidgets('the barrier dims the page as much as a dialog does', (
       tester,
     ) async {

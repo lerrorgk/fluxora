@@ -167,10 +167,12 @@ class FixedProxyRoutes extends ChangeNotifier {
     final nextIssues = <int, String>{};
     final paths = <int, int>{};
     for (final route in enabled) {
+      final proxyCount = (config['proxies'] as List?)?.length ?? 0;
       final issue = route.attach(config, nodes);
       if (issue == null) {
         paths[route.port] = const DeepCollectionEquality().hash([
-          for (final hop in route.hops) [hop, nodes[hop]],
+          ...route.hops,
+          ...(config['proxies'] as List).skip(proxyCount),
         ]);
       } else {
         nextIssues[route.port] = issue;

@@ -71,6 +71,57 @@ void main() {
     },
   );
 
+  test('pins the first node’s subscription dialers ahead of explicit hops', () {
+    const bridge = (source: 'sub-A', node: 'bridge');
+    const entry = (source: 'sub-A', node: 'entry');
+    final catalog = {
+      ...nodes,
+      front: {...nodes[front]!, 'dialer-proxy': 'bridge'},
+      bridge: {'name': 'bridge', 'server': 'bridge-a', 'dialer-proxy': 'entry'},
+      entry: {'name': 'entry', 'server': 'entry-a'},
+      (source: 'sub-B', node: 'bridge'): {
+        'name': 'bridge',
+        'server': 'bridge-b',
+      },
+      exit: {...nodes[exit]!, 'dialer-proxy': 'overridden-by-explicit-hop'},
+    };
+    final config = <String, dynamic>{};
+    expect(
+      const FixedProxyRoute(25001, [front, exit]).attach(config, catalog),
+      isNull,
+    );
+    final copies = (config['proxies'] as List).cast<Map>();
+    expect(copies.map((p) => p['server']), [
+      'entry-a',
+      'bridge-a',
+      'front',
+      'exit',
+    ]);
+    expect(copies.every((p) => p['fluxora-private'] == true), isTrue);
+    expect(copies.first['dialer-proxy'], isNull);
+    for (var i = 1; i < copies.length; i++) {
+      expect(copies[i]['dialer-proxy'], copies[i - 1]['name']);
+    }
+    expect((config['listeners'] as List).single['proxy'], copies.last['name']);
+    expect(catalog[front]!['dialer-proxy'], 'bridge');
+  });
+
+  test('missing and circular subscription dialers leave no partial route', () {
+    const gateway = (source: 'sub-A', node: 'bridge');
+    final catalog = {
+      ...nodes,
+      front: {...nodes[front]!, 'dialer-proxy': 'bridge'},
+      (source: 'sub-B', node: 'bridge'): {'name': 'bridge'},
+    };
+    const route = FixedProxyRoute(25001, [front]);
+    final config = <String, dynamic>{};
+    expect(route.attach(config, catalog), contains('bridge'));
+    expect(config, isEmpty);
+    catalog[gateway] = {'name': 'bridge', 'dialer-proxy': 'Tokyo'};
+    expect(route.attach(config, catalog), contains('Circular'));
+    expect(config, isEmpty);
+  });
+
   test(
     'missing or same-name node from a different source cannot partially attach',
     () {

@@ -72,8 +72,30 @@ class FixedProxyRoute {
       ].whereType<Map>())
         p['name'],
     };
+    // The first subscription node may itself need a specific upstream to
+    // reach its server. Pin those nodes from the same subscription as well.
+    // Later explicit hops use the preceding hop chosen in the route editor.
+    final dialers = <FixedHop>{};
+    var entry = hops.first;
+    while (entry.source.isNotEmpty) {
+      final dialer = nodes[entry]?['dialer-proxy'];
+      if (dialer == null ||
+          dialer == '' ||
+          dialer == 'DIRECT' ||
+          dialer == 'GLOBAL') {
+        break;
+      }
+      final upstream = (source: entry.source, node: dialer.toString());
+      if (!nodes.containsKey(upstream)) {
+        return 'Dialer "$dialer" for "${entry.node}" is not a node in its subscription';
+      }
+      if (upstream == hops.first || !dialers.add(upstream)) {
+        return 'Circular dialer dependency: $dialer';
+      }
+      entry = upstream;
+    }
     final copies = <Map<String, dynamic>>[];
-    for (final hop in hops) {
+    for (final hop in [...dialers.toList().reversed, ...hops]) {
       final node = nodes[hop];
       if (node == null) return 'Node unavailable: ${hop.node}';
       final name = '$listener-hop-${copies.length + 1}';
