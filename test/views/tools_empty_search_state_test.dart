@@ -19,7 +19,6 @@ import 'package:fluxora/models/models.dart';
 import 'package:fluxora/state.dart';
 import 'package:fluxora/manager/chain_proxy_manager.dart';
 import 'package:fluxora/manager/fixed_proxy_routes.dart';
-import 'package:fluxora/models/chain_proxy.dart';
 import 'package:fluxora/models/fixed_proxy_route.dart';
 import 'package:fluxora/views/tools.dart';
 import 'package:fluxora/widgets/fluxora/fluxora.dart';

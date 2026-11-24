@@ -117,8 +117,9 @@ class ProfileChainManager extends ChangeNotifier {
 
   Future<void> reload() async {
     final json = await AtomicConfigStorage(await _getConfigFilePath()).load();
-    if (json == null)
+    if (json == null) {
       throw const FormatException('Invalid profile chain configuration');
+    }
     _chains = json.map(
       (id, value) => MapEntry(
         id,
