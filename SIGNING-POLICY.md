@@ -4,8 +4,7 @@ This describes the current `.github/workflows/build.yaml` implementation, not re
 
 | Trigger | Build | Signing | GitHub Release |
 | --- | --- | --- | --- |
-| vX.Y.Z tag | All configured platforms | Required for Windows and Android | Stable |
-| vX.Y.Z-rc.N tag | All configured platforms | Required for Windows and Android | Pre-release |
+| vX.Y.Z-lg.N tag | All configured platforms | Personal signing keys required for Windows and Android | Stable release in this fork |
 | Manual, release_validation=true | Selected platform(s) | Release signing validation | None |
 | Manual, release_validation=false | Selected platform(s) | Windows signing disabled; Android still requires release keystore | None |
 | main / dev push | Analysis and tests in test.yaml | None | None |

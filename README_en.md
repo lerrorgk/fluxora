@@ -26,6 +26,15 @@ Configuration, connections, rules and traffic state in one calm, legible, audita
 
 ---
 
+## Personal fork maintenance
+
+This fork is maintained by lerrorgk. Install the first personal build from this repository. The app checks the same repository for subsequent releases. Android builds use a separate signing key, so export your configuration before switching from upstream. [Personal releases](https://github.com/lerrorgk/fluxora/releases/latest) · [Upstream Fluxora](https://github.com/Tiam9173/fluxora)
+
+- Keep `main` as the stable branch. Branch from it for `feat/*` and `fix/*` changes, then merge back after testing.
+- Use `origin` for this fork and `upstream` for Fluxora. To adopt an upstream release, branch from personal `main` as `sync/X.Y.Z`, merge tag `vX.Y.Z`, and test fixed ports, proxy chains and profile switching. Keep the merge history when integrating into `main`. Start upstream contributions from the upstream target branch.
+- Tag releases as `vX.Y.Z-lg.N`. Increment the revision for each release on a given upstream version and restart at `lg.1` for each new base. Increment the numeric build number after `+` in `pubspec.yaml` on every release.
+- Push only the intended tag from a tested commit on `main` to `origin`. The workflow publishes a stable Release with the tag as its title, such as `v1.1.3-lg.1`. The updater compares the full version.
+
 ## Official community
 
 - 📢 **[Telegram Channel](https://t.me/Fluxora_Channel)** — releases, updates and project news
@@ -127,9 +136,7 @@ Open **Settings → Theme → App icon**; the icon variant and the page theme ar
 
 ## Download
 
-Packages are published on **[GitHub Releases](https://github.com/Tiam9173/fluxora/releases)**, named `Fluxora-<version>-<platform>`.
-
-The current stable release is **[v1.1.2](https://github.com/Tiam9173/fluxora/releases/tag/v1.1.2)**. The version string in the source tree does not mean a package was published — check Releases for the actual state and downloads.
+Personal builds use the filename `Fluxora-<version>-<platform>`. [Latest stable release](https://github.com/lerrorgk/fluxora/releases/latest) · [All releases](https://github.com/lerrorgk/fluxora/releases)
 
 | Platform | Formats | Architectures |
 |---|---|---|
@@ -202,8 +209,9 @@ No. Fluxora has no cloud account service and no built-in telemetry. Subscription
 **Requirements**: Flutter (with Dart), Android SDK/NDK and a JDK, plus the platform toolchains (Visual Studio Build Tools on Windows, Xcode on macOS, GTK development libraries on Linux). The core and helper are Go / Rust components and need their toolchains.
 
 ```bash
-git clone https://github.com/Tiam9173/fluxora.git
+git clone https://github.com/lerrorgk/fluxora.git
 cd fluxora
+git remote add upstream https://github.com/Tiam9173/fluxora.git
 flutter pub get
 dart run build_runner build -d
 flutter analyze

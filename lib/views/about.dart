@@ -13,7 +13,7 @@ import 'package:flutter_riverpod/flutter_riverpod.dart';
 class AboutView extends StatelessWidget {
   const AboutView({super.key});
 
-  static const String githubRepoUrl = 'https://github.com/Tiam9173/fluxora';
+  static const String githubRepoUrl = 'https://github.com/$repository';
   static const String telegramChannelUrl = 'https://t.me/Fluxora_Channel';
   static const String telegramGroupUrl = 'https://t.me/Fluxora_Group1';
 

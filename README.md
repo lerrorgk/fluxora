@@ -26,6 +26,15 @@
 
 ---
 
+## 个人版维护约定
+
+这是 lerrorgk 维护的 Fluxora 个人版。首次安装请从本仓库的 Releases 下载安装包，后续客户端会在这里检查更新。Android 个人版使用独立签名，从上游版切换前请先导出配置。[个人版下载](https://github.com/lerrorgk/fluxora/releases/latest) · [Fluxora 上游](https://github.com/Tiam9173/fluxora)
+
+- `main` 是个人稳定分支。日常改动从 `main` 开 `feat/*` 或 `fix/*`，验证后合回。
+- `origin` 指向本仓库，`upstream` 指向上游。同步正式版时，从个人 `main` 开 `sync/X.Y.Z`，合入上游 tag `vX.Y.Z`，回归固定端口、链式代理和配置切换，再保留合并历史合回 `main`。给上游提交 PR 时，从上游的目标分支单独开发。
+- 个人发布标签为 `vX.Y.Z-lg.N`。同一上游版本按 `lg.1`、`lg.2` 递增，切换上游版本后从 `lg.1` 开始。每次发布也递增 `pubspec.yaml` 中 `+` 后面的安装包构建号。
+- 在验证过的 `main` 提交上打 tag，只向 `origin` 推送本次 tag。工作流创建同名正式 Release，例如 `v1.1.3-lg.1`。客户端按完整版本号检查更新。
+
 ## 官方社区
 
 - 📢 **[官方 Telegram 频道](https://t.me/Fluxora_Channel)** —— 获取 Fluxora 更新、版本发布与项目动态
@@ -127,9 +136,7 @@
 
 ## 下载
 
-安装包统一发布在 **[GitHub Releases](https://github.com/Tiam9173/fluxora/releases)**，命名格式为 `Fluxora-<version>-<platform>`。
-
-当前正式版为 **[v1.1.2](https://github.com/Tiam9173/fluxora/releases/tag/v1.1.2)**。源码中的版本号不代表安装包已经发布——版本状态与下载内容以 Releases 页面为准。
+个人版安装包以 `Fluxora-<version>-<platform>` 命名。[最新正式版](https://github.com/lerrorgk/fluxora/releases/latest) · [全部版本](https://github.com/lerrorgk/fluxora/releases)
 
 | 平台 | 提供格式 | 架构 |
 |---|---|---|
@@ -202,8 +209,9 @@ iOS 需要独立的 Network Extension 实现与开发者签名分发，尚未列
 **前置要求**：Flutter（含 Dart）、Android SDK/NDK 与 JDK、对应平台的构建工具（Windows 需 Visual Studio Build Tools，macOS 需 Xcode，Linux 需 GTK 开发库）。代理核心与 Helper 为 Go / Rust 组件，需要相应工具链。
 
 ```bash
-git clone https://github.com/Tiam9173/fluxora.git
+git clone https://github.com/lerrorgk/fluxora.git
 cd fluxora
+git remote add upstream https://github.com/Tiam9173/fluxora.git
 flutter pub get
 dart run build_runner build -d
 flutter analyze

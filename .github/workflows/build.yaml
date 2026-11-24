@@ -5,7 +5,7 @@ run-name: ${{ github.event_name == 'workflow_dispatch' && format('Build validati
 on:
   push:
     tags:
-      - 'v*'
+      - 'v[0-9]+.[0-9]+.[0-9]+-lg.[0-9]+'
   workflow_dispatch:
     inputs:
       release_validation:
@@ -27,10 +27,8 @@ on:
           - linux
 
 env:
-  APP_ENV: ${{ github.ref_type == 'tag' && startsWith(github.ref_name, 'v') && !contains(github.ref_name, '-') && !contains(github.ref_name, 'pre') && 'stable' || 'pre' }}
-  IS_PRERELEASE: ${{ contains(github.ref_name, '-rc.') || contains(github.ref_name, 'pre') }}
-  SHOULD_RELEASE: ${{ github.event_name == 'push' && startsWith(github.ref, 'refs/tags/v') && (!contains(github.ref, '-') || contains(github.ref_name, '-rc.') || contains(github.ref_name, 'pre')) }}
-  SHOULD_SIGN: ${{ (github.event_name == 'push' && startsWith(github.ref, 'refs/tags/v')) || (github.event_name == 'workflow_dispatch' && inputs.release_validation == true) }}
+  APP_ENV: ${{ (github.event_name == 'push' || inputs.release_validation) && 'stable' || 'pre' }}
+  SHOULD_SIGN: ${{ github.event_name == 'push' || inputs.release_validation }}
   GRADLE_OPTS: -Dorg.gradle.vfs.watch=false
   FORCE_JAVASCRIPT_ACTIONS_TO_NODE24: true
   SENTRY_BACKEND: none
@@ -643,10 +641,12 @@ jobs:
           overwrite: true
 
   upload:
-    permissions: write-all
+    permissions:
+      contents: write
+      actions: read
     needs: [ build ]
     runs-on: ubuntu-latest
-    if: github.event_name == 'push' && startsWith(github.ref, 'refs/tags/v')
+    if: github.event_name == 'push'
     steps:
       - name: Checkout
         uses: actions/checkout@v6
@@ -676,17 +676,16 @@ jobs:
           else
             version=$(grep '^version:' pubspec.yaml | cut -d' ' -f2 | cut -d'+' -f1)
           fi
-          base_version=$(echo "$version" | sed 's/-pre[0-9]*//')
-          if [ "${{ env.IS_PRERELEASE }}" == "true" ]; then
-            sed -e "s|BASE_VERSION|$base_version|g" -e "s|VERSION|$version|g" ./.github/release_template_pre.md >> release.md
-          else
-            sed -e "s|BASE_VERSION|$base_version|g" -e "s|VERSION|$version|g" ./.github/release_template.md >> release.md
-          fi
+          printf '\n' >> release.md
+          sed -e "s|REPOSITORY_URL|${GITHUB_SERVER_URL}/${GITHUB_REPOSITORY}|g" \
+              -e "s|VERSION|$version|g" .github/release_template.md >> release.md
 
       - name: Release
-        if: ${{ env.SHOULD_RELEASE == 'true' }}
         uses: softprops/action-gh-release@v3.0.0
         with:
+          name: ${{ github.ref_name }}
           files: ./dist/*
           body_path: './release.md'
-          prerelease: ${{ env.IS_PRERELEASE == 'true' }}
+          fail_on_unmatched_files: true
+          prerelease: false
+          make_latest: true
