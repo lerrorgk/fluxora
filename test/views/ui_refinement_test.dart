@@ -362,7 +362,10 @@ void main() {
     await tester.pump();
     await tester.pump(const Duration(milliseconds: 500));
     if (morePage) {
-      final entry = find.text(Intl.message(page.name)).last;
+      final entry = find.descendant(
+        of: find.byType(ToolsView),
+        matching: find.text(Intl.message(page.name)),
+      );
       await tester.scrollUntilVisible(
         entry,
         280,
@@ -1826,8 +1829,12 @@ void main() {
         );
         expect(tester.takeException(), isNull);
         await capture(tester, '$screen-settings-${brightness.name}');
-        await tester.ensureVisible(
+        await tester.scrollUntilVisible(
           find.byKey(const ValueKey('settings-resources')),
+          280,
+          scrollable: find.descendant(
+            of: find.byType(ToolsView), matching: find.byType(Scrollable),
+          ).first,
         );
         await tester.pumpAndSettle();
         await capture(tester, '$screen-settings-resources-${brightness.name}');

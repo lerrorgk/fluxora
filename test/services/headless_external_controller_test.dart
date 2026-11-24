@@ -3,6 +3,16 @@ import 'package:fluxora/state.dart';
 import 'package:flutter_test/flutter_test.dart';
 
 void main() {
+  test('the panel and its setup use the active port and preserve the secret', () {
+    const secret = 'a&b=100% #中';
+    final uri = externalControllerPanelUri('127.0.0.1:19091', secret);
+    expect(uri.port, 19091);
+    expect(uri.path, '/ui/');
+    expect(Uri.parse(uri.fragment).queryParameters, {
+      'hostname': '127.0.0.1', 'port': '19091', 'secret': secret,
+    });
+  });
+
   test('headless default forceLoopback resolves without AppController', () {
     expect(globalState.hasAppController, isFalse);
     expect(globalState.sessionExternalController, isNull);

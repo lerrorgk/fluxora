@@ -279,7 +279,7 @@ class SystemProxyReadbackService {
         .toString()
         .split('\n')
         .map((l) => l.trim())
-        .where((l) => l.isNotEmpty && !l.startsWith('An asterisk'))
+        .where((l) => l.isNotEmpty && !l.startsWith('*') && !l.startsWith('An asterisk'))
         .firstOrNull;
     if (service == null) {
       return SystemProxyReadback.unknown(platform, error: 'no network service');
@@ -326,7 +326,9 @@ class SystemProxyReadbackService {
 
   // ── Linux ────────────────────────────────────────────────────────────────
   Future<SystemProxyReadback> _readLinux(String platform) async {
-    // GNOME first (the desktop the SET path prefers), then KDE.
+    if ((Platform.environment['XDG_CURRENT_DESKTOP'] ?? '').toUpperCase().contains('KDE')) {
+      return _readKde(platform);
+    }
     final gnome = await _run('gsettings', [
       'get',
       'org.gnome.system.proxy',
@@ -365,33 +367,35 @@ class SystemProxyReadbackService {
       );
     }
 
-    // KDE: `kreadconfig5/6 --group ... --key ...`
-    final kde = await _run('kreadconfig5', [
-      '--group',
-      'Proxy',
-      '--key',
-      'ProxyType',
-    ]).timeout(readTimeout);
-    if (kde.exitCode == 0) {
-      final type = kde.stdout.toString().trim();
-      if (type.isEmpty) {
-        return SystemProxyReadback.unknown(platform, error: 'empty ProxyType');
-      }
-      final enabled = type != '0' && type.toLowerCase() != 'none';
-      return SystemProxyReadback(
-        actualState: enabled
-            ? SystemProxyActualState.enabled
-            : SystemProxyActualState.disabled,
-        platform: platform,
-        checkedAt: DateTime.now(),
-      );
-    }
+    return _readKde(platform);
+  }
 
-    // Unknown desktop environment ⇒ unknown, never a guess.
-    return SystemProxyReadback.unknown(
-      platform,
-      error: 'no supported desktop proxy backend (gsettings/kreadconfig5)',
-    );
+  Future<SystemProxyReadback> _readKde(String platform) async {
+    for (final exe in ['kreadconfig6', 'kreadconfig5']) {
+      try {
+        const args = ['--file', 'kioslaverc', '--group', 'Proxy Settings', '--key'];
+        final res = await _run(exe, [...args, 'ProxyType', '--default', '0']).timeout(readTimeout);
+        final type = int.tryParse(res.stdout.toString().trim());
+        if (res.exitCode != 0 || type == null) continue;
+        String? host;
+        int? port;
+        if (type == 1) {
+          final endpoint = await _run(exe, [...args, 'httpProxy']).timeout(readTimeout);
+          final uri = Uri.tryParse(endpoint.stdout.toString().trim());
+          if (endpoint.exitCode == 0 && uri != null && uri.host.isNotEmpty) {
+            host = uri.host;
+            if (uri.hasPort) port = uri.port;
+          }
+        }
+        return SystemProxyReadback(
+          actualState: type == 0 ? SystemProxyActualState.disabled : SystemProxyActualState.enabled,
+          platform: platform, checkedAt: DateTime.now(), host: host, port: port,
+        );
+      } on ProcessException {
+        continue;
+      }
+    }
+    return SystemProxyReadback.unknown(platform, error: 'KDE proxy settings unavailable');
   }
 
   /// Parses `host:port` / `http=host:port;https=...` into (host, port).

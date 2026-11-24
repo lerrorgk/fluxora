@@ -105,6 +105,7 @@ const (
 	getTotalTrafficMethod                Method = "getTotalTraffic"
 	resetTrafficMethod                   Method = "resetTraffic"
 	checkDefaultRouteMethod              Method = "checkDefaultRoute"
+	getFixedListenerStatusMethod         Method = "getFixedListenerStatus"
 	asyncTestDelayMethod                 Method = "asyncTestDelay"
 	getConnectionsMethod                 Method = "getConnections"
 	closeConnectionsMethod               Method = "closeConnections"

@@ -5,7 +5,9 @@ import (
 	"sync"
 	"unsafe"
 
+	"github.com/metacubex/mihomo/adapter/outbound"
 	cProxy "github.com/metacubex/mihomo/constant"
+	"github.com/metacubex/mihomo/log"
 	"github.com/metacubex/mihomo/tunnel"
 )
 
@@ -18,7 +20,7 @@ var (
 	suspendedHCLock    sync.Mutex
 	suspendedEntries   []suspendedEntry
 	suspendedWGLock    sync.Mutex
-	suspendedWGDevices = make(map[uintptr]reflect.Value)
+	suspendedWGDevices = make(map[*outbound.WireGuard]struct{})
 )
 
 func findFieldByName(v reflect.Value, name string) reflect.Value {
@@ -122,45 +124,18 @@ func pauseSingleWireGuard(p cProxy.Proxy) {
 		return
 	}
 
-	initOkField := findFieldByName(reflect.ValueOf(p), "initOk")
-	if initOkField.IsValid() {
-		loadMethod := initOkField.MethodByName("Load")
-		if loadMethod.IsValid() {
-			res := loadMethod.Call(nil)
-			if len(res) > 0 && !res[0].Bool() {
-				return
-			}
-		}
-	}
-
-	devField := findFieldByName(reflect.ValueOf(p), "device")
-	if !devField.IsValid() || devField.IsNil() {
+	device := outbound.WireGuardFor(p.Adapter())
+	if device == nil {
 		return
 	}
-
-	devVal := devField
-	if devVal.Kind() == reflect.Interface {
-		if devVal.IsNil() {
-			return
-		}
-		devVal = devVal.Elem()
-	}
-	if devVal.Kind() != reflect.Pointer || devVal.IsNil() {
+	if _, exists := suspendedWGDevices[device]; exists {
 		return
 	}
-
-	ptr := devVal.Pointer()
-	if _, exists := suspendedWGDevices[ptr]; exists {
+	if err := device.SetDevicePaused(true); err != nil {
+		log.Warnln("[WG] Pause %s: %v", p.Name(), err)
 		return
 	}
-
-	downMethod := devVal.MethodByName("Down")
-	if !downMethod.IsValid() {
-		return
-	}
-
-	_ = downMethod.Call(nil)
-	suspendedWGDevices[ptr] = devVal
+	suspendedWGDevices[device] = struct{}{}
 }
 
 func pauseWireGuard() {
@@ -181,17 +156,16 @@ func resumeWireGuard() {
 	suspendedWGLock.Lock()
 	defer suspendedWGLock.Unlock()
 
-	for _, devVal := range suspendedWGDevices {
-		upMethod := devVal.MethodByName("Up")
-		if upMethod.IsValid() {
-			_ = upMethod.Call(nil)
+	for device := range suspendedWGDevices {
+		if err := device.SetDevicePaused(false); err != nil {
+			log.Warnln("[WG] Resume %s: %v", device.Name(), err)
 		}
 	}
-	suspendedWGDevices = make(map[uintptr]reflect.Value)
+	suspendedWGDevices = make(map[*outbound.WireGuard]struct{})
 }
 
 func clearSuspendedWireGuard() {
 	suspendedWGLock.Lock()
 	defer suspendedWGLock.Unlock()
-	suspendedWGDevices = make(map[uintptr]reflect.Value)
+	suspendedWGDevices = make(map[*outbound.WireGuard]struct{})
 }

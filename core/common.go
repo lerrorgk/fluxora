@@ -37,6 +37,7 @@ var (
 	version          = 0
 	isRunning        = false
 	runLock          sync.Mutex
+	inboundFailures  map[string]error
 	mBatch, _        = batch.New[bool](context.Background(), batch.WithConcurrencyNum[bool](50))
 )
 
@@ -99,23 +100,15 @@ func toExternalProvider(p cp.Provider) (*ExternalProvider, error) {
 }
 
 func sideUpdateExternalProvider(p cp.Provider, bytes []byte) error {
-	switch p.(type) {
+	switch p := p.(type) {
 	case *provider.ProxySetProvider:
-		psp := p.(*provider.ProxySetProvider)
-		_, _, err := psp.SideUpdate(bytes)
-		if err == nil {
-			return err
-		}
-		return nil
+		_, _, err := p.SideUpdate(bytes)
+		return err
 	case *provider.InlineProvider:
-		return nil
-	case rp.RuleSetProvider:
-		rsp := p.(*rp.RuleSetProvider)
-		_, _, err := rsp.SideUpdate(bytes)
-		if err == nil {
-			return err
-		}
-		return nil
+		return errors.New("inline providers cannot be replaced with a file")
+	case *rp.RuleSetProvider:
+		_, _, err := p.SideUpdate(bytes)
+		return err
 	default:
 		return errors.New("not external provider")
 	}
@@ -137,7 +130,7 @@ func updateListeners() error {
 	}
 	listeners := currentConfig.Listeners
 	general := currentConfig.General
-	failures := listener.PatchInboundListeners(listeners, tunnel.Tunnel, true)
+	inboundFailures = listener.PatchInboundListeners(listeners, tunnel.Tunnel, true)
 	listener.SetAllowLan(general.AllowLan)
 	inbound.SetSkipAuthPrefixes(general.SkipAuthPrefixes)
 	inbound.SetAllowedIPs(general.LanAllowedIPs)
@@ -161,12 +154,35 @@ func updateListeners() error {
 	if !features.Android && general.Tun.Enable && !listener.GetTunConf().Enable {
 		listenerErrors = append(listenerErrors, errors.New("TUN listener did not start"))
 	}
-	for name, err := range failures {
+	for name, err := range inboundFailures {
 		if strings.HasPrefix(name, "fluxora-fixed-") {
 			listenerErrors = append(listenerErrors, fmt.Errorf("%s: %w", name, err))
 		}
 	}
 	return errors.Join(listenerErrors...)
+}
+
+func fixedListenerStatus() map[string]string {
+	runLock.Lock()
+	defer runLock.Unlock()
+	status := map[string]string{}
+	if !isRunning || currentConfig == nil {
+		return status
+	}
+	for name, expected := range currentConfig.Listeners {
+		if !strings.HasPrefix(name, "fluxora-fixed-") {
+			continue
+		}
+		switch {
+		case listener.InboundListenerMatches(expected):
+			status[name] = ""
+		case inboundFailures[name] != nil:
+			status[name] = inboundFailures[name].Error()
+		default:
+			status[name] = "Listener is not bound"
+		}
+	}
+	return status
 }
 
 func stopListeners() {

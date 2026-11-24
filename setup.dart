@@ -572,16 +572,23 @@ class BuildCommand extends Command {
   }
 
   DateTime _windowsSourcesLastModified() {
+    final coreDir = Directory(Build._coreDir);
     final helperDir = Directory(Build._servicesDir);
-    if (!helperDir.existsSync()) {
-      return DateTime.fromMillisecondsSinceEpoch(0);
-    }
     return _latestModified([
       File(join(current, 'setup.dart')),
-      ...helperDir.listSync(recursive: true).where((entity) {
-        return entity is File &&
-            !isWithin(join(Build._servicesDir, 'target'), entity.path);
-      }),
+      if (coreDir.existsSync())
+        ...coreDir.listSync(recursive: true, followLinks: false).where((entity) {
+          if (entity is! File || entity.path.endsWith('_test.go')) return false;
+          final name = basename(entity.path);
+          return const {'go.mod', 'go.sum', 'VERSION'}.contains(name) ||
+              const {'.go', '.s', '.c', '.h', '.syso', '.crt'}
+                  .contains(extension(name).toLowerCase());
+        }),
+      if (helperDir.existsSync())
+        ...helperDir.listSync(recursive: true, followLinks: false).where((entity) {
+          return entity is File &&
+              !isWithin(join(Build._servicesDir, 'target'), entity.path);
+        }),
     ]);
   }
 
@@ -657,6 +664,18 @@ class BuildCommand extends Command {
       }
     }
 
+    if (actualOut == 'helper') {
+      if (target != Target.windows) {
+        throw '--out helper is only supported for windows';
+      }
+      if (coreHash == null || coreHash.isEmpty) {
+        throw '--core-hash is required when --out=helper';
+      }
+      // The release workflow has already signed the core whose hash it passed.
+      await Build.buildHelper(target, coreHash);
+      return;
+    }
+
     final corePaths = await Build.buildCore(
       target: target,
       arch: arch,
@@ -665,17 +684,6 @@ class BuildCommand extends Command {
     );
 
     if (actualOut == 'core-only') {
-      return;
-    }
-
-    if (actualOut == 'helper') {
-      if (target != Target.windows) {
-        throw '--out helper is only supported for windows';
-      }
-      if (coreHash == null || coreHash.isEmpty) {
-        throw '--core-hash is required when --out=helper';
-      }
-      await Build.buildHelper(target, coreHash);
       return;
     }
 

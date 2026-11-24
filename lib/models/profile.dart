@@ -29,11 +29,12 @@ abstract class SubscriptionInfo with _$SubscriptionInfo {
 
   factory SubscriptionInfo.formHString(String? info) {
     if (info == null) return const SubscriptionInfo();
-    final list = info.split(';');
-    Map<String, int?> map = {};
-    for (final i in list) {
-      final keyValue = i.trim().split('=');
-      map[keyValue[0]] = int.tryParse(keyValue[1]);
+    final map = <String, int>{};
+    for (final field in info.split(';')) {
+      final separator = field.indexOf('=');
+      if (separator < 1) continue;
+      final value = int.tryParse(field.substring(separator + 1).trim());
+      if (value != null) map[field.substring(0, separator).trim()] = value;
     }
     return SubscriptionInfo(
       upload: map['upload'] ?? 0,
@@ -169,6 +170,12 @@ extension ProfileExtension on Profile {
 
   bool get realAutoUpdate => url.isEmpty == true ? false : autoUpdate;
 
+  bool isUpdateDue(DateTime now) =>
+      realAutoUpdate &&
+      !isUpdating &&
+      (lastUpdateDate == null ||
+          !now.isBefore(lastUpdateDate!.add(autoUpdateDuration)));
+
   /// Applies an optional `profile-web-page-url` response header.
   ///
   /// A manual value (including an explicitly cleared one) always wins; an
@@ -183,15 +190,6 @@ extension ProfileExtension on Profile {
       portalUrl: normalized,
       portalSource: ProfilePortalSource.subscription,
     );
-  }
-
-  Future<void> checkAndUpdate() async {
-    final isExists = await check();
-    if (!isExists) {
-      if (url.isNotEmpty) {
-        await update();
-      }
-    }
   }
 
   Future<bool> check() async {
@@ -214,23 +212,43 @@ extension ProfileExtension on Profile {
     return (await file.lastModified()).microsecondsSinceEpoch;
   }
 
-  Future<Profile> update({bool validate = true}) async {
+  Future<Profile> update({
+    bool Function()? canCommit,
+    Future<String> Function(String)? mergeManualNodes,
+  }) async {
     final response = await request.getFileResponseForUrl(url);
+    if (canCommit?.call() == false) return this;
     final disposition = response.headers['content-disposition']?.firstOrNull;
     final userinfo = response.headers['subscription-userinfo']?.firstOrNull;
-    final portalHeader = response.headers['profile-web-page-url']
-        ?.firstOrNull
+    final portalHeader = response.headers['profile-web-page-url']?.firstOrNull
         ?.trim();
-    return await withSubscriptionPortalHeader(portalHeader)
-        .copyWith(
-          label: label ?? utils.getFileNameForDisposition(disposition) ?? id,
-          subscriptionInfo: SubscriptionInfo.formHString(userinfo),
-        )
-        .saveFile(response.data, validate: validate);
+    final updated = withSubscriptionPortalHeader(portalHeader).copyWith(
+      label: label ?? utils.getFileNameForDisposition(disposition) ?? id,
+      subscriptionInfo: SubscriptionInfo.formHString(userinfo),
+    );
+    var content = await _validatedContent(utf8.decode(response.data));
+    if (mergeManualNodes != null) {
+      final merged = await mergeManualNodes(content);
+      if (merged != content) content = await _validatedContent(merged);
+    }
+    return updated._writeContent(content, canCommit: canCommit);
   }
 
-  Future<Profile> saveFile(Uint8List bytes, {bool validate = true}) async {
-    String content = utf8.decode(bytes);
+  Future<Profile> saveFile(
+    Uint8List bytes, {
+    bool Function()? canCommit,
+  }) async => _writeContent(
+    await _validatedContent(utf8.decode(bytes)),
+    canCommit: canCommit,
+  );
+
+  Future<Profile> saveFileWithString(String value) async =>
+      _writeContent(await _validatedContent(value));
+
+  Future<String> _validatedContent(String content) async {
+    if (content.trim().isEmpty) {
+      throw const FormatException('Subscription is empty');
+    }
     final key = ageSecretKey;
     if (key != null && key.isNotEmpty) {
       try {
@@ -241,59 +259,41 @@ extension ProfileExtension on Profile {
       } catch (_) {}
     }
     content = utils.patchYamlConfig(content);
-    if (validate) {
-      final message =
-          await clashCore.validateConfig(content, ageSecretKey: ageSecretKey);
-      if (message.isNotEmpty) {
-        final patched = utils.patchValidateConfig(content);
-        if (patched != content) {
-          final patchedMessage =
-              await clashCore.validateConfig(patched, ageSecretKey: ageSecretKey);
-          if (patchedMessage.isEmpty) {
-            content = patched;
-          } else {
-            throw message;
-          }
-        } else {
-          throw message;
-        }
-      }
+    final message = await clashCore.validateConfig(
+      content,
+      ageSecretKey: ageSecretKey,
+    );
+    if (message.isEmpty) return content;
+    final patched = utils.patchValidateConfig(content);
+    if (patched != content &&
+        (await clashCore.validateConfig(
+          patched,
+          ageSecretKey: ageSecretKey,
+        )).isEmpty) {
+      return patched;
     }
-    final file = await getFile();
-    await file.writeAsString(content);
-    return copyWith(lastUpdateDate: DateTime.now());
+    throw message;
   }
 
-  Future<Profile> saveFileWithString(String value) async {
-    String content = value;
-    final key = ageSecretKey;
-    if (key != null && key.isNotEmpty) {
-      try {
-        final decrypted = await clashCore.decryptAgeConfig(content, key);
-        if (decrypted.isNotEmpty) {
-          content = decrypted;
-        }
-      } catch (_) {}
-    }
-    content = utils.patchYamlConfig(content);
-    final message =
-        await clashCore.validateConfig(content, ageSecretKey: ageSecretKey);
-    if (message.isNotEmpty) {
-      final patched = utils.patchValidateConfig(content);
-      if (patched != content) {
-        final patchedMessage =
-            await clashCore.validateConfig(patched, ageSecretKey: ageSecretKey);
-        if (patchedMessage.isEmpty) {
-          content = patched;
-        } else {
-          throw message;
-        }
-      } else {
-        throw message;
+  Future<Profile> _writeContent(
+    String content, {
+    bool Function()? canCommit,
+  }) async {
+    final path = await appPath.getProfilePath(id);
+    final temporary = File('$path.${utils.uuidV4}.tmp');
+    await temporary.parent.create(recursive: true);
+    var published = false;
+    try {
+      await temporary.writeAsString(content, flush: true);
+      // Keep the final stale-request check and the rename in one isolate turn.
+      if (canCommit?.call() == false) return this;
+      temporary.renameSync(path);
+      published = true;
+      return copyWith(lastUpdateDate: DateTime.now());
+    } finally {
+      if (!published && await temporary.exists()) {
+        await temporary.delete();
       }
     }
-    final file = await getFile();
-    await file.writeAsString(content);
-    return copyWith(lastUpdateDate: DateTime.now());
   }
 }

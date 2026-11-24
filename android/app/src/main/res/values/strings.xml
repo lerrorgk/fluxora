@@ -5,6 +5,7 @@
     <string name="action_stop">Stop</string>
     <string name="action_switch">Switch</string>
     <string name="action_reset">Reset</string>
+    <string name="notification_reset_failed">Could not reset the connection</string>
     <string name="action_speed_test">Speed test</string>
     <string name="core_suspended">Suspended</string>
     <string name="smart_auto_stop_service_running">Auto-stop is running</string>

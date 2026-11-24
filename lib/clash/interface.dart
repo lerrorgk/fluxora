@@ -1,7 +1,10 @@
 import 'dart:async';
 import 'dart:collection';
 import 'dart:convert';
+import 'dart:io';
 import 'dart:isolate';
+import 'package:crypto/crypto.dart';
+import 'package:path/path.dart' as p;
 
 import 'package:fluxora/clash/message.dart';
 import 'package:fluxora/common/common.dart';
@@ -39,6 +42,8 @@ mixin ClashInterface {
 
   Future<bool> checkDefaultRoute(String url);
 
+  Future<Map<String, String>> getFixedListenerStatus();
+
   FutureOr<String> updateConfig(UpdateParams updateParams, {String? controllerAddress});
 
   FutureOr<String> setupConfig(SetupParams setupParams);
@@ -59,7 +64,7 @@ mixin ClashInterface {
 
   Future<String> sideLoadExternalProvider({
     required String providerName,
-    required String data,
+    required List<int> data,
   });
 
   Future<String> updateExternalProvider(String providerName);
@@ -244,6 +249,7 @@ abstract class ClashHandlerInterface with ClashInterface {
     return invoke<String>(
       method: ActionMethod.validateConfig,
       data: json.encode(params),
+      onTimeout: () => throw TimeoutException('Core did not validate the configuration'),
     );
   }
 
@@ -345,12 +351,24 @@ abstract class ClashHandlerInterface with ClashInterface {
   @override
   Future<String> sideLoadExternalProvider({
     required String providerName,
-    required String data,
-  }) {
-    return invoke<String>(
-      method: ActionMethod.sideLoadExternalProvider,
-      data: json.encode({'providerName': providerName, 'data': data}),
-    );
+    required List<int> data,
+  }) async {
+    final filename = '.provider-import-${utils.uuidV4}';
+    final file = File(p.join(await appPath.homeDirPath, filename));
+    try {
+      await file.writeAsBytes(data, flush: true);
+      return await invoke<String>(
+        method: ActionMethod.sideLoadExternalProvider,
+        data: json.encode({
+          'providerName': providerName,
+          'file': filename,
+          'sha256': sha256.convert(data).toString(),
+        }),
+        onTimeout: () => throw TimeoutException('Core did not acknowledge the provider import'),
+      );
+    } finally {
+      if (await file.exists()) await file.delete();
+    }
   }
 
   @override
@@ -445,6 +463,15 @@ abstract class ClashHandlerInterface with ClashInterface {
     timeout: const Duration(seconds: 6),
     onTimeout: () => false,
   );
+
+  @override
+  Future<Map<String, String>> getFixedListenerStatus() async {
+    final result = await invoke<Map>(
+      method: ActionMethod.getFixedListenerStatus,
+      timeout: const Duration(seconds: 3),
+    );
+    return Map<String, String>.from(result);
+  }
 
   @override
   Future<String> asyncTestDelay(String url, String proxyName) async {

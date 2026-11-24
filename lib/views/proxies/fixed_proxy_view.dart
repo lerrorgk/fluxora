@@ -58,6 +58,7 @@ class _FixedProxyViewState extends ConsumerState<FixedProxyView> {
   Future<void> _load() async {
     try {
       await store.load();
+      await store.refreshBindings();
       final catalog = await store.catalog();
       if (!mounted) return;
       final sources = {
@@ -84,7 +85,7 @@ class _FixedProxyViewState extends ConsumerState<FixedProxyView> {
     for (final port in active.keys.toList()) {
       if (!store.routes.any((r) => r.port == port && r.enabled) ||
           store.pathSignature(port) != signatures[port] ||
-          store.issues.containsKey(port)) {
+          store.issueFor(port) != null) {
         _forget(port);
       }
     }
@@ -192,13 +193,25 @@ class _FixedProxyViewState extends ConsumerState<FixedProxyView> {
     if (!mounted ||
         busy ||
         active.containsKey(port) ||
-        store.issues.containsKey(port) ||
+        store.issueFor(port) != null ||
         !globalState.isStart ||
         !store.routes.any((r) => r.port == port && r.enabled)) {
       return;
     }
-    final probe = widget.createProbe(port);
+    final pass = generation;
     final session = globalState.startTime;
+    await store.refreshBindings();
+    if (!mounted ||
+        busy ||
+        generation != pass ||
+        active.containsKey(port) ||
+        !globalState.isStart ||
+        session != globalState.startTime ||
+        store.issueFor(port) != null ||
+        !store.routes.any((r) => r.port == port && r.enabled)) {
+      return;
+    }
+    final probe = widget.createProbe(port);
     final url = globalState.config.appSetting.testUrl.trim();
     setState(() {
       progress.remove(port);
@@ -230,7 +243,7 @@ class _FixedProxyViewState extends ConsumerState<FixedProxyView> {
   Future<void> _checkAll() async {
     if (batch || busy) return;
     final ports = store.routes
-        .where((r) => r.enabled && !store.issues.containsKey(r.port))
+        .where((r) => r.enabled && store.issueFor(r.port) == null)
         .map((r) => r.port)
         .toList();
     final pass = ++generation;
@@ -253,7 +266,9 @@ class _FixedProxyViewState extends ConsumerState<FixedProxyView> {
   Widget build(BuildContext context) {
     final running = ref.watch(runTimeProvider.select((v) => v != null));
     ref.listen(runTimeProvider.select((v) => v != null), (before, after) {
-      if (!after) {
+      if (after) {
+        unawaited(store.refreshBindings());
+      } else {
         setState(() {
           _cancel();
         });
@@ -432,7 +447,7 @@ class _FixedProxyViewState extends ConsumerState<FixedProxyView> {
                           ? progress[r.port]
                           : store.lastCheck(r.port),
                       checking: active.containsKey(r.port),
-                      issue: store.issues[r.port],
+                      issue: r.enabled ? store.issueFor(r.port) : null,
                       busy: busy,
                       onToggle: (v) => _change(r.port, r.withEnabled(v)),
                       onEdit: () => _edit(r),
@@ -442,7 +457,7 @@ class _FixedProxyViewState extends ConsumerState<FixedProxyView> {
                           !running ||
                               busy ||
                               !r.enabled ||
-                              store.issues.containsKey(r.port) ||
+                              store.issueFor(r.port) != null ||
                               batch
                           ? null
                           : active.containsKey(r.port)

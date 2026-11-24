@@ -41,6 +41,7 @@ void main() {
     scCalls = <List<String>>[];
     Windows.helperPingOverrideForTest = null;
     Windows.configureHelperServiceOverrideForTest = null;
+    Windows.deployHelperAssetsOverrideForTest = null;
     // `appPath` needs `path_provider`, which a plain `test()` cannot serve, so
     // the identity check reads this instead. Every test starts with a trusted
     // path unless it deliberately swaps in a foreign one.
@@ -224,6 +225,7 @@ void main() {
 
     test('T8 — concurrent register runs the sequence once', () async {
       var configureCalls = 0;
+      Windows.deployHelperAssetsOverrideForTest = () async => true;
       fakeSc(
         (args) => args.first == 'query'
             ? sc(1060, 'The specified service does not exist')
@@ -253,6 +255,7 @@ void main() {
   group('H2-A — first install stays the explicit path', () {
     test('only notInstalled reaches the configure sequence', () async {
       var configureCalls = 0;
+      Windows.deployHelperAssetsOverrideForTest = () async => true;
       fakeSc(
         (args) => args.first == 'query'
             ? sc(1060, 'The specified service does not exist')

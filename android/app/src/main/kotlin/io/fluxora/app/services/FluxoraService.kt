@@ -52,6 +52,8 @@ class FluxoraService : Service(), BaseServiceInterface {
         stopSelf()
     }
 
+    override suspend fun flashNotification() = foregroundNotification.flash()
+
     override suspend fun startForeground() = foregroundNotification.update(force = true)
 
     override suspend fun updateNotificationSpeed(speedInfo: String) =

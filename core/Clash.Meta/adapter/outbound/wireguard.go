@@ -45,6 +45,39 @@ const (
 type wireguardGoDevice interface {
 	Close()
 	IpcSet(uapiConf string) error
+	Down() error
+	Up() error
+}
+
+// WireGuardFor returns the device owner behind the standard outbound wrappers.
+func WireGuardFor(p C.ProxyAdapter) *WireGuard {
+	for {
+		switch adapter := p.(type) {
+		case *WireGuard:
+			return adapter
+		case *autoCloseProxyAdapter:
+			p = adapter.ProxyAdapter
+		case *SingMux:
+			p = adapter.ProxyAdapter
+		default:
+			return nil
+		}
+	}
+}
+
+// SetDevicePaused leaves unused and already closed devices alone.
+func (w *WireGuard) SetDevicePaused(paused bool) error {
+	w.initMutex.Lock()
+	defer w.initMutex.Unlock()
+	w.deviceMutex.Lock()
+	defer w.deviceMutex.Unlock()
+	if w.device == nil || w.runCtx.Err() != nil {
+		return nil
+	}
+	if paused {
+		return w.device.Down()
+	}
+	return w.device.Up()
 }
 
 type WireGuard struct {

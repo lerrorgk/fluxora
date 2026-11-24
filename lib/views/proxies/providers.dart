@@ -1,4 +1,3 @@
-import 'dart:convert';
 import 'dart:io';
 
 import 'package:fluxora/clash/clash.dart';
@@ -228,24 +227,20 @@ class ProviderItem extends StatelessWidget {
     await globalState.appController.safeRun<void>(() async {
       final platformFile = await picker.pickerFile();
       final bytes = platformFile?.bytes;
-      if (bytes == null || provider.path == null) return;
-      final file = await File(provider.path!).create(recursive: true);
-      await file.writeAsBytes(bytes);
-      final providerName = provider.name;
-      var message = await clashCore.sideLoadExternalProvider(
-        providerName: providerName,
-        data: utf8.decode(bytes),
+      if (bytes == null) return;
+      final message = await clashCore.sideLoadExternalProvider(
+        providerName: provider.name,
+        data: bytes,
       );
       if (message.isNotEmpty) throw message;
       globalState.appController.setProvider(
         await clashCore.getExternalProvider(provider.name),
       );
-      if (message.isNotEmpty) throw message;
+      globalState.appController.updateGroupsDebounce();
+      if (provider.type == 'Rule') {
+        globalState.appController.applyProfileDebounce(silence: true);
+      }
     });
-    globalState.appController.updateGroupsDebounce();
-    if (provider.type == 'Rule') {
-      globalState.appController.applyProfileDebounce(silence: true);
-    }
   }
 
   Future<void> _handleViewProviderContent(BuildContext context) async {
@@ -370,11 +365,12 @@ class ProviderItem extends StatelessWidget {
             spacing: 12,
             runAlignment: WrapAlignment.center,
             children: [
-              CommonChip(
-                avatar: const Icon(Icons.upload),
-                label: appLocalizations.upload,
-                onPressed: _handleSideLoadProvider,
-              ),
+              if (provider.path?.isNotEmpty == true)
+                CommonChip(
+                  avatar: const Icon(Icons.upload),
+                  label: appLocalizations.upload,
+                  onPressed: _handleSideLoadProvider,
+                ),
               CommonChip(
                 avatar: const Icon(Icons.visibility),
                 label: appLocalizations.view,

@@ -314,6 +314,8 @@ data object VpnPlugin : FlutterPlugin, MethodChannel.MethodCallHandler {
 
     fun requestNotificationSwitch() = invokeDart("notificationSwitch")
 
+    fun flashActiveNotification() { scope.launch { fluxoraService?.flashNotification() } }
+
     fun requestNotificationReset() = invokeDart("notificationReset")
 
     fun requestNotificationSpeedTest() = invokeDart("notificationSpeedTest")

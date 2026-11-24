@@ -114,6 +114,9 @@ listeners:
 	if !handleStartListener() {
 		t.Fatal("core failed to start")
 	}
+	if status := fixedListenerStatus(); len(status) != 1 || status["fluxora-fixed-chain"] != "" {
+		t.Fatalf("successful fixed bind not reported: %v", status)
+	}
 	request := func(scheme string, port int) bool {
 		transport := origin.Client().Transport.(*http.Transport).Clone()
 		transport.Proxy = http.ProxyURL(&url.URL{Scheme: scheme, Host: fmt.Sprintf("127.0.0.1:%d", port)})
@@ -150,6 +153,9 @@ listeners:
 	if !handleStartListener() || updateListeners() == nil {
 		t.Fatal("expected a fixed-port bind error with the main listener running")
 	}
+	if fixedListenerStatus()["fluxora-fixed-chain"] == "" {
+		t.Fatal("occupied fixed listener reported as bound")
+	}
 	tcp, err := net.Listen("tcp4", fmt.Sprintf("127.0.0.1:%d", ports[1]))
 	if err != nil {
 		t.Fatalf("partial bind kept TCP: %v", err)
@@ -158,5 +164,8 @@ listeners:
 	occupied.Close()
 	if err := updateListeners(); err != nil || !request("http", ports[1]) {
 		t.Fatalf("fixed port did not recover: %v", err)
+	}
+	if status := fixedListenerStatus(); len(status) != 1 || status["fluxora-fixed-chain"] != "" {
+		t.Fatalf("recovered listener still unavailable: %v", status)
 	}
 }

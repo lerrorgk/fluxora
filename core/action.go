@@ -1,9 +1,15 @@
 package main
 
 import (
+	"crypto/sha256"
 	"encoding/json"
+	"fmt"
+	"os"
+	"path/filepath"
+	"strings"
 
 	"github.com/metacubex/mihomo/component/age"
+	"github.com/metacubex/mihomo/constant"
 )
 
 type Action struct {
@@ -119,6 +125,9 @@ func handleAction(action *Action, result ActionResult) {
 		target, ok := action.Data.(string)
 		go func() { result.success(ok && checkDefaultRoute(target)) }()
 		return
+	case getFixedListenerStatusMethod:
+		result.success(fixedListenerStatus())
+		return
 	case asyncTestDelayMethod:
 		data := action.Data.(string)
 		handleAsyncTestDelay(data, func(value string) {
@@ -186,9 +195,15 @@ func handleAction(action *Action, result ActionResult) {
 			result.success(err.Error())
 			return
 		}
-		providerName := params["providerName"]
-		data := params["data"]
-		handleSideLoadExternalProvider(providerName, []byte(data), func(value string) {
+		data := []byte(params["data"])
+		if file, exists := params["file"]; exists {
+			data, err = readProviderImport(file, params["sha256"])
+			if err != nil {
+				result.success(err.Error())
+				return
+			}
+		}
+		handleSideLoadExternalProvider(params["providerName"], data, func(value string) {
 			result.success(value)
 		})
 		return
@@ -275,4 +290,28 @@ func handleAction(action *Action, result ActionResult) {
 	default:
 		nextHandle(action, result)
 	}
+}
+
+// A file in the shared core home keeps binary rule sets outside the IPC frame
+// size limit. Only the exact content selected by the client may be installed.
+func readProviderImport(name, digest string) ([]byte, error) {
+	if filepath.Base(name) != name || !strings.HasPrefix(name, ".provider-import-") {
+		return nil, fmt.Errorf("invalid provider import filename")
+	}
+	path := filepath.Join(constant.Path.HomeDir(), name)
+	info, err := os.Lstat(path)
+	if err != nil {
+		return nil, err
+	}
+	if !info.Mode().IsRegular() {
+		return nil, fmt.Errorf("invalid provider import file")
+	}
+	data, err := os.ReadFile(path)
+	if err != nil {
+		return nil, err
+	}
+	if fmt.Sprintf("%x", sha256.Sum256(data)) != digest {
+		return nil, fmt.Errorf("provider import content changed")
+	}
+	return data, nil
 }

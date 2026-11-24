@@ -328,15 +328,8 @@ class DAVClient {
         commonPrint.log('WebDAV mkdir warning (may already exist): $e');
       }
 
-      // Pick a free name, upload, then confirm the file we find under that name
-      // is the one we just wrote.
-      //
-      // `webdav_client`'s `write` is an unconditional PUT and its headers are set
-      // globally, so there is no way to ask for `If-None-Match: *` without
-      // mutating shared state for every other request. This is therefore
-      // *detection*, not prevention: two clients writing the same second can
-      // still race, and the loser notices here and retries under a new name
-      // instead of having silently overwritten the winner.
+      // A conditional PUT claims the name on the server, including when
+      // another device read the same directory listing before we uploaded.
       const maxAttempts = 3;
       for (var attempt = 1; attempt <= maxAttempts; attempt++) {
         final targetName = await getNextBackupFileName(encrypted: encrypted);
@@ -345,7 +338,23 @@ class DAVClient {
           'WebDAV backup: uploading ${payload.length} bytes to $targetPath',
         );
 
-        await client.write(targetPath, payload);
+        final upload = await client.c.req<void>(
+          client,
+          'PUT',
+          targetPath,
+          data: payload,
+          optionsHandler: (options) {
+            options.contentType = 'application/octet-stream';
+            options.headers?['If-None-Match'] = '*';
+            options.headers?['content-length'] = payload.length;
+          },
+        );
+        if (upload.statusCode == 412) continue;
+        if (upload.statusCode != 200 &&
+            upload.statusCode != 201 &&
+            upload.statusCode != 204) {
+          throw StateError('WebDAV upload failed (HTTP ${upload.statusCode})');
+        }
 
         final landed = (await getBackupEntries()).where(
           (e) => e.name.toLowerCase() == targetName.toLowerCase(),

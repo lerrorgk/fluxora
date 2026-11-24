@@ -343,8 +343,17 @@ void main() {
       }
     });
 
-    test('a REAL uds bound then failed to listen is unlinked and closed',
+    test('native transport survives a failed UDS listen or uses Windows TCP',
         () async {
+      if (Platform.isWindows) {
+        expect(await PlatformChecker.getRecommendedTransport(), TransportType.tcp);
+        await ExternalControl.start();
+        expect(File(portPath).existsSync(), isTrue);
+        expect(FileSystemEntity.typeSync(socketPath), FileSystemEntityType.notFound);
+        await ExternalControl.stop();
+        expect(File(portPath).existsSync(), isFalse);
+        return;
+      }
       // P7-B1 / A4': the test above hands out a *fake* `ServerSocket`, so it
       // proves the listener is closed but never touches a real file. This one
       // binds a real AF_UNIX socket through the OS, faults only `listen()`, and

@@ -1,6 +1,9 @@
 import 'dart:convert';
 import 'dart:io';
 
+import 'package:path/path.dart' as p;
+import 'package:synchronized/synchronized.dart';
+
 /// Atomic Config Storage for chain_proxies.json
 ///
 /// Write flow:
@@ -17,9 +20,20 @@ class AtomicConfigStorage {
   AtomicConfigStorage(this.filePath);
 
   final String filePath;
-  int _tmpCounter = 0;
+  static int _tmpCounter = 0;
+  static final _writers = <String, Lock>{};
 
   Future<void> save(Map<String, dynamic> data) async {
+    final key = p.canonicalize(filePath);
+    final lock = _writers.putIfAbsent(key, () => Lock());
+    try {
+      await lock.synchronized(() => _save(data));
+    } finally {
+      if (!lock.locked && identical(_writers[key], lock)) _writers.remove(key);
+    }
+  }
+
+  Future<void> _save(Map<String, dynamic> data) async {
     final targetFile = File(filePath);
     final backupFile = File('$filePath.bak');
     // Unique suffix per call to avoid concurrent-write collisions.
@@ -50,39 +64,9 @@ class AtomicConfigStorage {
         }
       }
 
-      // Step 4: Atomic rename.
-      try {
-        await tmpFile.rename(targetFile.path);
-      } catch (_) {
-        // On Windows, rename fails if the target already exists (no POSIX
-        // atomic replace), and `File.copy` also fails with `ALREADY_EXISTS` in
-        // that case. Fallback: copy then delete.
-        //
-        // P2.4-A: distinguish the two failure kinds instead of swallowing all:
-        //  * the target is already a valid *file* (a concurrent save won the
-        //    race) → nothing to do, this save's data is not needed;
-        //  * the target is not a file at all (e.g. a directory, or an
-        //    unwritable path) → the data did NOT land, so report the failure
-        //    rather than letting `save()` claim success.
-        if (await tmpFile.exists()) {
-          try {
-            await tmpFile.copy(targetFile.path);
-          } catch (_) {
-            // Decide synchronously and by the ONE deterministic failure shape:
-            // a target that is a *directory* (or otherwise not a file path) can
-            // never be written, so the failure must propagate. Every other
-            // outcome — including a target that is momentarily absent while a
-            // concurrent save replaces it — means another writer owns the
-            // path, which is not an error.
-            if (FileSystemEntity.isDirectorySync(targetFile.path)) {
-              rethrow;
-            }
-          }
-          try {
-            await tmpFile.delete();
-          } catch (_) {}
-        }
-      }
+      // Both paths share a directory. A failed replacement must reach the
+      // caller so it can retain the previously applied configuration.
+      await tmpFile.rename(targetFile.path);
     } catch (e) {
       // Clean up orphaned tmp on failure.
       if (await tmpFile.exists()) {

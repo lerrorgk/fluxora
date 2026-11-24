@@ -16,6 +16,9 @@ const front = (source: 'subscription', node: 'Tokyo 01');
 const exit = (source: '', node: 'exit-42');
 
 class _Store extends FixedProxyRoutes {
+  _Store([Map<String, String>? bindings])
+      : super(readBindings: () async => bindings ?? {'fluxora-fixed-20001': ''});
+
   @override
   final routes = <FixedProxyRoute>[
     const FixedProxyRoute(20001, [front, exit], name: 'Work browser'),
@@ -118,6 +121,16 @@ void main() {
       expect(tester.takeException(), isNull);
     },
   );
+
+  testWidgets('a port bound by another process cannot be credited with an exit', (tester) async {
+    store = _Store({'fluxora-fixed-20001': 'address already in use'});
+    await open(tester);
+    expect(find.text('address already in use'), findsOneWidget);
+    await tester.tap(find.text('Check all'));
+    await tester.pumpAndSettle();
+    expect(find.text('Looking up exit'), findsNothing);
+    expect(store.lastCheck(20001), isNull);
+  });
 
   testWidgets(
     'editing a route preserves its port, accepts a name and reorders hops',

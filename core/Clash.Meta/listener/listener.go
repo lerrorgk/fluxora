@@ -42,6 +42,7 @@ var (
 	mixedUDPLister      *socks.UDPListener
 	tunnelTCPListeners  = map[string]*LT.Listener{}
 	tunnelUDPListeners  = map[string]*LT.PacketConn{}
+	tunnelEnabled       = true
 	inboundListeners    = map[string]C.InboundListener{}
 	tunLister           *sing_tun.Listener
 	shadowSocksListener C.MultiAddrListener
@@ -541,7 +542,24 @@ func ReCreateTun(tunConf LC.Tun, tunnel C.Tunnel) {
 func PatchTunnel(tunnels []LC.Tunnel, tunnel C.Tunnel) {
 	tunnelMux.Lock()
 	defer tunnelMux.Unlock()
+	if tunnelEnabled {
+		patchTunnel(tunnels, tunnel)
+	}
+}
 
+// SetTunnelListeners follows the embedded app's connection lifecycle. Standalone
+// cores retain their default of applying forwards whenever configuration changes.
+func SetTunnelListeners(enabled bool, tunnels []LC.Tunnel, tunnel C.Tunnel) {
+	tunnelMux.Lock()
+	defer tunnelMux.Unlock()
+	tunnelEnabled = enabled
+	if !enabled {
+		tunnels = nil
+	}
+	patchTunnel(tunnels, tunnel)
+}
+
+func patchTunnel(tunnels []LC.Tunnel, tunnel C.Tunnel) {
 	type addrProxy struct {
 		network string
 		addr    string
@@ -552,7 +570,7 @@ func PatchTunnel(tunnels []LC.Tunnel, tunnel C.Tunnel) {
 	tcpOld := lo.Map(
 		lo.Keys(tunnelTCPListeners),
 		func(key string, _ int) addrProxy {
-			parts := strings.Split(key, "/")
+			parts := strings.SplitN(key, "/", 3)
 			return addrProxy{
 				network: "tcp",
 				addr:    parts[0],
@@ -564,7 +582,7 @@ func PatchTunnel(tunnels []LC.Tunnel, tunnel C.Tunnel) {
 	udpOld := lo.Map(
 		lo.Keys(tunnelUDPListeners),
 		func(key string, _ int) addrProxy {
-			parts := strings.Split(key, "/")
+			parts := strings.SplitN(key, "/", 3)
 			return addrProxy{
 				network: "udp",
 				addr:    parts[0],
@@ -662,6 +680,14 @@ func PatchInboundListeners(newListenerMap map[string]C.InboundListener, tunnel C
 		}
 	}
 	return failures
+}
+
+// InboundListenerMatches checks the listener map that owns the bound sockets.
+func InboundListenerMatches(expected C.InboundListener) bool {
+	inboundMux.Lock()
+	defer inboundMux.Unlock()
+	active := inboundListeners[expected.Name()]
+	return active != nil && active.Config().Equal(expected.Config())
 }
 
 // GetPorts return the ports of proxy servers

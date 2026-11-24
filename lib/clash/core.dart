@@ -313,7 +313,7 @@ class ClashCore {
 
   Future<String> sideLoadExternalProvider({
     required String providerName,
-    required String data,
+    required List<int> data,
   }) {
     return clashInterface.sideLoadExternalProvider(
       providerName: providerName,

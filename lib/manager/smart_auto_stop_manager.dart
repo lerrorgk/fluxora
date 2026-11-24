@@ -156,7 +156,6 @@ class _SmartAutoStopManagerState extends ConsumerState<SmartAutoStopManager> {
       if (!vpnProps.smartAutoStop) return;
 
       final networks = vpnProps.smartAutoStopNetworks;
-      if (networks.isEmpty) return;
 
       final isSmartStopped = ref.read(isSmartStoppedProvider);
 
@@ -172,22 +171,16 @@ class _SmartAutoStopManagerState extends ConsumerState<SmartAutoStopManager> {
         candidateGateways = await _getDesktopLocalGateways();
       }
 
-      if (candidateIps.isEmpty && candidateGateways.isEmpty) {
-        commonPrint.log('Smart Auto Stop: No IP/Gateway found. Skipping.');
-        return;
-      }
-
       // P2.6-A: the IP/gateway lookups above are `await`s — the State can be
       // disposed while they are in flight, so re-check before reading state or
       // mutating `ref` (this is the last point before the transition logic).
       if (!mounted) return;
 
       // Match: any IP hits an IP rule, or any gateway hits a gateway rule
-      final shouldStop =
-          candidateIps.any((ip) => NetworkMatcher.matchAny(ip, networks)) ||
-          candidateGateways.any(
-            (gw) => NetworkMatcher.matchAnyGateway(gw, networks),
-          );
+      final shouldStop = NetworkMatcher.shouldPause(
+        networks, candidateIps, candidateGateways,
+      );
+      if (shouldStop == null) return;
 
       commonPrint.log(
         'SmartAutoStop: IPs=${candidateIps.join(",")}, Gateways=${candidateGateways.join(",")}, RuleMatch=$shouldStop, SmartStopped=$isSmartStopped',

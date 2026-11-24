@@ -4,8 +4,11 @@ import android.content.BroadcastReceiver
 import android.content.Context
 import android.content.Intent
 import android.util.Log
+import android.widget.Toast
 import io.fluxora.app.GlobalState
+import io.fluxora.app.R
 import io.fluxora.app.RunState
+import io.fluxora.app.plugins.VpnPlugin
 import io.flutter.plugin.common.MethodChannel
 
 /// Receives the notification's action buttons.
@@ -44,34 +47,34 @@ class NotificationActionReceiver : BroadcastReceiver() {
             return
         }
 
-        // Flash first, natively: the restart itself is silent from the shade, and
-        // this must happen even when there is no Dart side to hand the reset to.
         if (action == FluxoraService.ACTION_RESET) {
-            context?.startService(
-                Intent(context, FluxoraVpnService::class.java)
-                    .setAction(FluxoraService.ACTION_FLASH)
-            )
+            reset(context?.applicationContext)
+            return
         }
-
-        val method = when (action) {
-            FluxoraService.ACTION_RESET -> "notificationReset"
-            FluxoraService.ACTION_SPEED_TEST -> "notificationSpeedTest"
-            else -> return
+        if (action == FluxoraService.ACTION_SPEED_TEST) {
+            val engine = GlobalState.flutterEngine ?: return
+            runCatching {
+                MethodChannel(engine.dartExecutor.binaryMessenger, CHANNEL)
+                    .invokeMethod("notificationSpeedTest", null)
+            }.onFailure { Log.e(TAG, "Speed test: invoke failed", it) }
         }
-        val delivered = invokeDart(method)
-        Log.i(TAG, "$action -> $method delivered=$delivered")
     }
 
-    private fun invokeDart(method: String): Boolean {
-        val engine = GlobalState.flutterEngine ?: return false
-        return runCatching {
-            MethodChannel(engine.dartExecutor.binaryMessenger, CHANNEL)
-                .invokeMethod(method, null)
-            true
-        }.getOrElse {
-            Log.e(TAG, "$method: invoke failed: ${it.message}")
-            false
+    private fun reset(context: Context?) {
+        fun failed(reason: String?) {
+            Log.e(TAG, "Notification reset failed: $reason")
+            context?.let { Toast.makeText(it, R.string.notification_reset_failed, Toast.LENGTH_SHORT).show() }
         }
+        val engine = GlobalState.notificationEngine() ?: return failed("No running engine")
+        val callback = object : MethodChannel.Result {
+            override fun success(result: Any?) = VpnPlugin.flashActiveNotification()
+            override fun error(code: String, message: String?, details: Any?) = failed(message ?: code)
+            override fun notImplemented() = failed("No reset handler")
+        }
+        runCatching {
+            MethodChannel(engine.dartExecutor.binaryMessenger, CHANNEL)
+                .invokeMethod("notificationReset", null, callback)
+        }.onFailure { failed(it.message) }
     }
 
     companion object {

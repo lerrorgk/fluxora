@@ -81,14 +81,10 @@ class _ProfilesViewState extends ConsumerState<ProfilesView> {
     final messages = <String>[];
     final updateProfiles = profiles.map<Future>((profile) async {
       if (profile.type == ProfileType.file) return;
-      globalState.appController.setProfile(profile.copyWith(isUpdating: true));
       try {
         await globalState.appController.updateProfile(profile);
       } on Object catch (e) {
         messages.add('${profile.label ?? profile.id}: ${e.formatError}\n');
-        globalState.appController.setProfile(
-          profile.copyWith(isUpdating: false),
-        );
       }
     });
     await Future.wait(updateProfiles);
@@ -395,10 +391,8 @@ class ProfileItem extends StatelessWidget {
     final appController = globalState.appController;
     if (profile.type == ProfileType.file) return;
     try {
-      appController.setProfile(profile.copyWith(isUpdating: true));
       await appController.updateProfile(profile);
     } on Object catch (e) {
-      appController.setProfile(profile.copyWith(isUpdating: false));
       globalState.showMessage(
         title: appLocalizations.tip,
         message: TextSpan(

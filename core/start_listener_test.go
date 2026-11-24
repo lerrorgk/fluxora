@@ -15,6 +15,7 @@ import (
 	"github.com/metacubex/mihomo/config"
 	"github.com/metacubex/mihomo/constant"
 	"github.com/metacubex/mihomo/listener"
+	LC "github.com/metacubex/mihomo/listener/config"
 	"github.com/metacubex/mihomo/tunnel"
 )
 
@@ -119,4 +120,50 @@ func TestStartListenerRejectsUnconfiguredAndOccupiedPort(t *testing.T) {
 	if !handleStartListener() || listener.GetPorts().MixedPort != conflict {
 		t.Fatal("could not retry the same mixed port")
 	}
+}
+
+func TestForwardedPortFollowsListenerLifecycle(t *testing.T) {
+	previous, running := currentConfig, isRunning
+	t.Cleanup(func() {
+		handleStopListener()
+		currentConfig, isRunning = previous, running
+	})
+	port, err := net.Listen("tcp4", "127.0.0.1:0")
+	if err != nil {
+		t.Fatal(err)
+	}
+	address := port.Addr().String()
+	_ = port.Close()
+	currentConfig = &config.Config{
+		General: &config.General{},
+		Tunnels: []LC.Tunnel{{
+			Network: []string{"tcp", "udp"}, Address: address,
+			Target: "127.0.0.1:1", Proxy: "Local/Forward",
+		}},
+	}
+	expectAvailable := func(want bool) {
+		t.Helper()
+		tcp, tcpErr := net.Listen("tcp4", address)
+		if tcp != nil {
+			tcp.Close()
+		}
+		udp, udpErr := net.ListenPacket("udp4", address)
+		if udp != nil {
+			udp.Close()
+		}
+		if (tcpErr == nil) != want || (udpErr == nil) != want {
+			t.Fatalf("available=%v, tcp=%v, udp=%v", want, tcpErr, udpErr)
+		}
+	}
+	isRunning = false
+	listener.PatchTunnel(currentConfig.Tunnels, tunnel.Tunnel)
+	expectAvailable(true)
+	if !handleStartListener() {
+		t.Fatal("failed to start")
+	}
+	expectAvailable(false)
+	listener.PatchTunnel(currentConfig.Tunnels, tunnel.Tunnel)
+	expectAvailable(false)
+	handleStopListener()
+	expectAvailable(true)
 }

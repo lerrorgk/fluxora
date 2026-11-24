@@ -139,26 +139,43 @@ class EditProfileViewState extends State<EditProfileView> {
     final portalChanged =
         portalUrl != this.profile.portalUrl ||
         portalLabel != this.profile.portalLabel;
-    Profile profile = this.profile.copyWith(
-      url: urlController.text,
-      label: labelController.text.trim().isEmpty
-          ? null
-          : labelController.text.trim(),
-      portalUrl: portalUrl,
-      portalLabel: portalLabel,
+    final initial = this.profile;
+    final url = urlController.text;
+    final label = labelController.text.trim();
+    final secret = ageSecretKeyController.text.trim();
+    final interval = Duration(
+      minutes: int.parse(autoUpdateDurationController.text),
+    );
+    var enableUpdates = autoUpdate;
+    final aggregate = _joinAggregate;
+    final alias = aggregateAliasController.text.trim();
+    Profile applyEdits(Profile current) => current.copyWith(
+      url: url == initial.url ? current.url : url,
+      label: label == (initial.label ?? '')
+          ? current.label
+          : (label.isEmpty ? null : label),
+      portalUrl: portalChanged ? portalUrl : current.portalUrl,
+      portalLabel: portalChanged ? portalLabel : current.portalLabel,
       portalSource: portalChanged
           ? ProfilePortalSource.manual
-          : this.profile.portalSource,
-      ageSecretKey: ageSecretKeyController.text.trim().isEmpty
-          ? null
-          : ageSecretKeyController.text.trim(),
-      autoUpdate: autoUpdate,
-      autoUpdateDuration: Duration(
-        minutes: int.parse(autoUpdateDurationController.text),
-      ),
-      joinAggregate: _joinAggregate,
-      aggregateAlias: aggregateAliasController.text.trim(),
+          : current.portalSource,
+      ageSecretKey: secret == (initial.ageSecretKey ?? '')
+          ? current.ageSecretKey
+          : (secret.isEmpty ? null : secret),
+      autoUpdate: enableUpdates == initial.autoUpdate
+          ? current.autoUpdate
+          : enableUpdates,
+      autoUpdateDuration: interval == initial.autoUpdateDuration
+          ? current.autoUpdateDuration
+          : interval,
+      joinAggregate: aggregate == initial.joinAggregate
+          ? current.joinAggregate
+          : aggregate,
+      aggregateAlias: alias == initial.aggregateAlias
+          ? current.aggregateAlias
+          : alias,
     );
+    final profile = applyEdits(initial);
     if (widget.isNew) {
       final ref = appController.ref;
       ref.read(loadingProvider.notifier).value = true;
@@ -178,7 +195,10 @@ class EditProfileViewState extends State<EditProfileView> {
         ref.read(loadingProvider.notifier).value = false;
       }
     } else {
-      final hasUpdate = widget.profile.url != profile.url;
+      final hasUpdate =
+          initial.url != profile.url ||
+          (profile.url.isNotEmpty &&
+              initial.ageSecretKey != profile.ageSecretKey);
       if (fileData != null) {
         if (profile.type == ProfileType.url && autoUpdate) {
           final res = await globalState.showMessage(
@@ -186,12 +206,15 @@ class EditProfileViewState extends State<EditProfileView> {
             message: TextSpan(text: appLocalizations.profileHasUpdate),
           );
           if (res == true) {
-            profile = profile.copyWith(autoUpdate: false);
+            enableUpdates = false;
           }
         }
         try {
-          final updatedProfile = await profile.saveFile(fileData!);
-          appController.setProfileAndAutoApply(updatedProfile);
+          await appController.updateProfile(
+            initial,
+            edit: applyEdits,
+            fileData: fileData,
+          );
         } catch (e) {
           if (mounted) {
             await globalState.showMessage(
@@ -203,11 +226,10 @@ class EditProfileViewState extends State<EditProfileView> {
           return;
         }
       } else if (!hasUpdate) {
-        appController.setProfileAndAutoApply(profile);
+        appController.editProfile(initial.id, applyEdits);
       } else {
         try {
-          await Future.delayed(commonDuration);
-          await appController.updateProfile(profile);
+          await appController.updateProfile(initial, edit: applyEdits);
         } on Object catch (e) {
           await globalState.showMessage(
             title: appLocalizations.tip,

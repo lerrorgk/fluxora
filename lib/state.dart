@@ -52,6 +52,19 @@ String resolveExternalControllerValue({
   return allowLan ? address.replaceAll('127.0.0.1', '0.0.0.0') : address;
 }
 
+Uri externalControllerPanelUri(String address, String secret) {
+  final endpoint = Uri.http(address, '/ui/');
+  final setup = Uri(
+    path: '/setup',
+    queryParameters: {
+      'hostname': endpoint.host,
+      'port': '${endpoint.port}',
+      'secret': secret,
+    },
+  );
+  return endpoint.replace(fragment: setup.toString());
+}
+
 class GlobalState {
   static GlobalState? _instance;
   Map<CacheTag, FixedMap<String, double>> computeHeightMapCache = {};
@@ -493,6 +506,7 @@ class GlobalState {
       rethrow;
     }
     startTime ??= DateTime.now();
+    if (!isService) await fixedProxyRoutes.refreshBindings();
     unawaited(startUpdateTasks(tasks));
     try {
       final prefs = await preferences.sharedPreferencesCompleter.future;

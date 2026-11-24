@@ -1115,8 +1115,15 @@ class ManualProxyHelper {
   ) async {
     await _rememberManual(profile, newProxies);
     final file = await profile.getFile();
-    String content = await file.exists() ? await file.readAsString() : '';
+    final content = await file.readAsString();
+    final merged = await _mergeProxies(content, newProxies);
+    return profile.saveFileWithString(merged);
+  }
 
+  static Future<String> _mergeProxies(
+    String content,
+    List<Map<String, dynamic>> newProxies,
+  ) async {
     Map<String, dynamic> configMap = {};
     if (content.trim().isNotEmpty) {
       try {
@@ -1180,9 +1187,7 @@ class ManualProxyHelper {
       configMap['rules'] = ['MATCH,PROXY'];
     }
 
-    final newYaml = await encodeYamlTask(configMap);
-    final updatedProfile = await profile.saveFileWithString(newYaml);
-    return updatedProfile;
+    return encodeYamlTask(configMap);
   }
 
   /// Deletes a proxy from a Profile's YAML file by name.
@@ -1247,11 +1252,11 @@ class ManualProxyHelper {
     if (store.length != before) await _writeManualStore(profile, store);
   }
 
-  /// 订阅更新后把手动节点补回去。没有手动节点时是空操作。
-  static Future<Profile> restoreManualProxies(Profile profile) async {
+  /// Merge into the pending download so the existing file survives a failure.
+  static Future<String> mergeSavedProxies(Profile profile, String content) async {
     final store = await _readManualStore(profile);
-    if (store.isEmpty) return profile;
-    return addOrUpdateProxiesToProfile(profile, store);
+    if (store.isEmpty) return content;
+    return _mergeProxies(content, store);
   }
 
   static Future<Profile> deleteProxyFromProfile(

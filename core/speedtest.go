@@ -295,11 +295,17 @@ func speedtestTarget(ctx context.Context, client *http.Client) (string, string, 
 	return bestName, down, base + "/upload", down, true
 }
 
-type speedCounter struct {
-	total int64
-	// 计时过半时记一次总量，用来把爬坡期排除掉。
-	halfwayBytes int64
-	halfwaySet   int32
+type downloadSample struct {
+	bytes   int64
+	elapsed time.Duration
+}
+
+func (end downloadSample) mbpsSince(start downloadSample) float64 {
+	elapsed := end.elapsed - start.elapsed
+	if elapsed <= 0 {
+		return 0
+	}
+	return float64(end.bytes-start.bytes) * 8 / 1_000_000 / elapsed.Seconds()
 }
 
 func newSpeedClient(outbound string) *http.Client {
@@ -479,44 +485,42 @@ func measureLatency(ctx context.Context, client *http.Client, n int) ([]int, err
 }
 
 func measureDownload(ctx context.Context, client *http.Client, report func(SpeedTestProgress)) (float64, error) {
-	counter := &speedCounter{}
+	var total atomic.Int64
 	start := time.Now()
 	var wg sync.WaitGroup
 	errs := make(chan error, speedTestStreams)
 
 	stopSampling := make(chan struct{})
+	rampSample := make(chan downloadSample, 1)
 	go func() {
 		ticker := time.NewTicker(speedTestSampleMs * time.Millisecond)
 		defer ticker.Stop()
-		var last int64
+		var last, ramp downloadSample
 		for {
 			select {
 			case <-stopSampling:
+				rampSample <- ramp
 				return
 			case <-ticker.C:
-				cur := atomic.LoadInt64(&counter.total)
-				if atomic.LoadInt32(&counter.halfwaySet) == 0 &&
-					time.Since(start) > speedTestRampWindow {
-					atomic.StoreInt64(&counter.halfwayBytes, cur)
-					atomic.StoreInt32(&counter.halfwaySet, 1)
+				cur := downloadSample{bytes: total.Load(), elapsed: time.Since(start)}
+				if ramp.elapsed == 0 && cur.elapsed >= speedTestRampWindow {
+					ramp = cur
 				}
-				delta := cur - last
-				last = cur
-				elapsed := time.Since(start).Seconds()
 				// 前 30% 是爬坡期，速度还没稳定，报上去只会让人误判。
 				percent := 10
-				if elapsed > 0 {
-					percent = 10 + int(40*float64(cur)/float64(speedTestDownBytes))
+				if cur.elapsed > 0 {
+					percent = 10 + int(40*float64(cur.bytes)/float64(speedTestDownBytes))
 					if percent > 50 {
 						percent = 50
 					}
 				}
 				report(SpeedTestProgress{
 					Phase:      speedTestPhaseDown,
-					DownMbps:   mbps(delta, speedTestSampleMs),
+					DownMbps:   cur.mbpsSince(last),
 					Percent:    percent,
 					ServerName: speedTestName,
 				})
+				last = cur
 			}
 		}
 	}()
@@ -541,7 +545,7 @@ func measureDownload(ctx context.Context, client *http.Client, report func(Speed
 			for {
 				n, err := resp.Body.Read(buf)
 				if n > 0 {
-					atomic.AddInt64(&counter.total, int64(n))
+					total.Add(int64(n))
 				}
 				if err != nil {
 					if err != io.EOF {
@@ -553,24 +557,18 @@ func measureDownload(ctx context.Context, client *http.Client, report func(Speed
 		}()
 	}
 	wg.Wait()
+	end := downloadSample{bytes: total.Load(), elapsed: time.Since(start)}
 	close(stopSampling)
+	ramp := <-rampSample
 	close(errs)
 
-	if err := <-errs; err != nil && atomic.LoadInt64(&counter.total) == 0 {
+	if err := <-errs; err != nil && end.bytes == 0 {
 		return 0, err
 	}
-	elapsed := time.Since(start).Seconds()
-	if elapsed <= 0 {
-		return 0, nil
+	if ramp.elapsed >= end.elapsed {
+		ramp = downloadSample{}
 	}
-	// 前一半时间是爬坡（TCP 慢启动、并发流建立），只取后半段的增量算速度。
-	// 之前虽然注释这么写，实现却是全程平均，所以读数偏保守。
-	half := int64(atomic.LoadInt64(&counter.halfwayBytes))
-	tail := atomic.LoadInt64(&counter.total) - half
-	if half > 0 && tail > 0 {
-		return mbps(tail, int(elapsed*500)), nil
-	}
-	return mbps(atomic.LoadInt64(&counter.total), int(elapsed*1000)), nil
+	return end.mbpsSince(ramp), nil
 }
 
 func measureUpload(ctx context.Context, client *http.Client, report func(SpeedTestProgress), latency int, down float64) (float64, error) {

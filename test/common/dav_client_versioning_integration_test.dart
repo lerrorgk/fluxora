@@ -23,6 +23,7 @@ class FakeWebDavServer {
 
   /// Set to make the next `PUT` fail, simulating a server that refuses writes.
   bool failWrites = false;
+  bool simulateConcurrentWriter = false;
 
   /// Set to make `DELETE` fail, simulating a prune that cannot complete.
   bool failDeletes = false;
@@ -73,7 +74,13 @@ class FakeWebDavServer {
       case 'MKCOL':
         request.response.statusCode = HttpStatus.created;
       case 'PUT':
-        if (failWrites) {
+        if (simulateConcurrentWriter) {
+          files[path] = utf8.encode('other device');
+          simulateConcurrentWriter = false;
+        }
+        if (files.containsKey(path) && request.headers.value('if-none-match') == '*') {
+          request.response.statusCode = HttpStatus.preconditionFailed;
+        } else if (failWrites) {
           request.response.statusCode = HttpStatus.internalServerError;
         } else {
           files[path] = await request.fold<List<int>>(
@@ -186,6 +193,13 @@ void main() {
     expect(server.backupNames(), hasLength(2));
     // Both payloads must still be on the server — neither was clobbered.
     expect(server.payloads(), containsAll(['first', 'second']));
+  });
+
+  test('retries under a different name when another device wins the PUT', () async {
+    server.simulateConcurrentWriter = true;
+    expect(await client.backup(utf8.encode('this device')), isTrue);
+    expect(server.backupNames(), hasLength(2));
+    expect(server.payloads(), {'this device', 'other device'});
   });
 
   test('keeps only the newest 10 versions', () async {

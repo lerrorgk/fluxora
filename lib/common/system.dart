@@ -897,7 +897,7 @@ class Windows {
       return false;
     }
 
-    final sourceDir = appPath.executableDirPath;
+    final sourceDir = dirname(Platform.resolvedExecutable);
     final installer = HelperInstaller(
       inspector: Win32AclInspector(),
       manifest: HelperAssetManifest.fromEnvironment(),

@@ -104,6 +104,9 @@ class ApplicationState extends ConsumerState<Application>
     _syncAutoUpdateTasks();
     globalState.appController = AppController(context, ref);
     WidgetsBinding.instance.addPostFrameCallback((_) {
+      if (!mounted) return;
+      // 内网地址直接读本机网卡，不依赖网络事件或内核初始化。
+      unawaited(globalState.appController.updateLocalIp());
       unawaited(_initApp());
     });
   }
@@ -123,7 +126,7 @@ class ApplicationState extends ConsumerState<Application>
       // The second construction used to replace the instance created in
       // `initState` and orphan it. That is not merely a wasted allocation: every
       // per-instance guard (`_coreLifecycleLock`, `_coreGeneration`, the
-      // in-flight `_isUpdatingGroups` / `_updatingProfileIds` state) is per
+      // in-flight group and subscription update state) is per
       // object, so the single-flight and stale-result guarantees were silently
       // split across two controllers for the rest of the session.
       globalState.appController.rebindContext(currentContext);
@@ -203,11 +206,8 @@ class ApplicationState extends ConsumerState<Application>
 
   void _autoUpdateProfilesTask() {
     _autoUpdateProfilesTaskTimer = Timer.periodic(
-      const Duration(hours: 24),
-      // P2.6-D: fire-and-forget by design (the 24h tick must not be blocked),
-      // but routed through an explicit boundary: a `Timer` callback has no
-      // `await` above it, so a bare `unawaited(...)` let a failure escape as an
-      // unhandled async error.
+      // Subscription intervals are configured in whole minutes.
+      const Duration(minutes: 1),
       (_) => unawaited(
         runDetachedTask(
           globalState.appController.autoUpdateProfiles,

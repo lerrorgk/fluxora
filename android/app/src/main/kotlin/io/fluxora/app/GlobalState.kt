@@ -419,6 +419,8 @@ object GlobalState {
         }
     }
 
+    fun notificationEngine(): FlutterEngine? = flutterEngine ?: serviceEngine
+
     fun isServiceEngineRunning(): Boolean = serviceEngine != null
 
     fun reconnectIpc() {

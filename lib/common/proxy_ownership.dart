@@ -5,6 +5,8 @@ import 'dart:io';
 import 'package:fluxora/common/common.dart';
 import 'package:flutter/foundation.dart' show visibleForTesting;
 import 'package:win32_registry/win32_registry.dart';
+import 'package:proxy/unix_system_proxy.dart';
+import 'package:synchronized/synchronized.dart';
 
 /// The WinINET values that decide where traffic actually goes.
 ///
@@ -208,6 +210,18 @@ enum ProxyRestoreOutcome {
 class ProxyOwnership {
   ProxyOwnership._();
 
+  static final _lock = Lock();
+  static bool get _isUnixDesktop =>
+      readForTest == null && (Platform.isLinux || Platform.isMacOS);
+
+  static Future<UnixSystemProxy> _unixProxy() async {
+    final backend = Platform.isMacOS ? 'macos'
+        : (Platform.environment['XDG_CURRENT_DESKTOP'] ?? '').toUpperCase().contains('KDE')
+            ? 'kde' : 'gnome';
+    final dir = await appPath.homeDirPath;
+    return UnixSystemProxy(File('$dir/proxy_ownership_$backend.json'), backend: backend);
+  }
+
   /// Test seams. Production uses the registry and the real plugin.
   static ProxySnapshot? Function()? readForTest;
   static Future<bool?> Function(int port, List<String> bypass)? startForTest;
@@ -339,12 +353,12 @@ class ProxyOwnership {
     }
   }
 
-  static Future<bool?> _start(int port, List<String> bypass) {
+  static Future<bool?> _start(int port, List<String> bypass, {bool own = false}) {
     final override = startForTest;
     if (override != null) return override(port, bypass);
     final plugin = proxy;
     if (plugin == null) return Future<bool?>.value(null);
-    return plugin.startProxy(port, bypass);
+    return own ? plugin.startOwnedWindowsProxy(port, bypass) : plugin.startProxy(port, bypass);
   }
 
   static Future<bool?> _stop() {
@@ -420,7 +434,12 @@ class ProxyOwnership {
     required int port,
     required List<String> bypass,
     bool allowRetakeover = false,
-  }) async {
+  }) => _lock.synchronized(() async {
+    if (_isUnixDesktop) return (await _unixProxy()).apply(port, bypass);
+    return _applyWindows(port, bypass, allowRetakeover);
+  });
+
+  static Future<bool> _applyWindows(int port, List<String> bypass, bool allowRetakeover) async {
     final before = read();
     if (before == null) return false; // cannot undo what we cannot measure
 
@@ -536,7 +555,7 @@ class ProxyOwnership {
 
     bool? ok;
     try {
-      ok = await _start(port, cleanBypass);
+      ok = await _start(port, cleanBypass, own: true);
     } catch (e) {
       commonPrint.log('ProxyOwnership: startProxy threw: $e');
       ok = false;
@@ -684,7 +703,15 @@ class ProxyOwnership {
 
   /// Releases the proxy **only** if we own it and the system still holds our
   /// value. Called from the exit path and from `ProxyManager`.
-  static Future<ProxyReleaseOutcome> release({required String reason}) async {
+  static Future<ProxyReleaseOutcome> release({required String reason}) =>
+      _lock.synchronized(() => _release(reason));
+
+  static Future<ProxyReleaseOutcome> _release(String reason) async {
+    if (_isUnixDesktop) {
+      final unix = await _unixProxy();
+      if (!await unix.record.exists()) return ProxyReleaseOutcome.notOwned;
+      return await unix.release() ? ProxyReleaseOutcome.restored : ProxyReleaseOutcome.restoreFailed;
+    }
     final state = await load();
     if (!state.owned) return ProxyReleaseOutcome.notOwned;
 
@@ -707,6 +734,18 @@ class ProxyOwnership {
       return ProxyReleaseOutcome.ownershipUnknown;
     }
 
+    if (Platform.isWindows && readForTest == null) {
+      // The native session snapshot includes PAC flags and individual RAS
+      // connections. It also guards the synchronous Windows logoff callback.
+      final restored = await proxy?.releaseWindowsSessionProxy();
+      if (restored == false) return ProxyReleaseOutcome.restoreFailed;
+      if (restored == true) {
+        await _clear();
+        return current.sameRouting(applied)
+            ? ProxyReleaseOutcome.restored
+            : ProxyReleaseOutcome.externalChange;
+      }
+    }
     if (!current.sameRouting(applied)) {
       // Clash Verge (or anything else) changed it while we held it. Their
       // value wins — we drop our claim and touch nothing.
@@ -763,6 +802,14 @@ class ProxyOwnership {
   /// Both states are now handled, and the outcome is returned so the decision is
   /// observable rather than only visible in a log.
   static Future<ProxyReleaseOutcome> reconcileOnStart() async {
+    if (_isUnixDesktop) {
+      try {
+        return await release(reason: 'startup');
+      } catch (e) {
+        commonPrint.log('Could not restore the desktop proxy on startup: $e');
+        return ProxyReleaseOutcome.restoreFailed;
+      }
+    }
     final state = await load();
     if (!state.owned && !state.pending) return ProxyReleaseOutcome.notOwned;
 

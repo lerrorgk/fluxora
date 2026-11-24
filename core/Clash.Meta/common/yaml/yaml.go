@@ -5,6 +5,8 @@ import (
 	"go.yaml.in/yaml/v3"
 )
 
+type Node = yaml.Node
+
 func Unmarshal(in []byte, out any) (err error) {
 	return yaml.Unmarshal(in, out)
 }

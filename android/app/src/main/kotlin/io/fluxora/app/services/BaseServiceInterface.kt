@@ -1,9 +1,6 @@
 package io.fluxora.app.services
 
-import android.content.Context
 import android.annotation.SuppressLint
-import android.content.BroadcastReceiver
-import android.content.IntentFilter
 import android.app.Notification
 import android.app.Notification.FOREGROUND_SERVICE_IMMEDIATE
 import android.app.NotificationChannel
@@ -36,6 +33,7 @@ interface BaseServiceInterface {
     fun stop()
     suspend fun startForeground()
     suspend fun updateNotificationSpeed(speedInfo: String)
+    suspend fun flashNotification()
 }
 
 /// Builds the expanded (big) notification view with all four action buttons.
@@ -67,12 +65,11 @@ fun Service.buildExpandedNotificationViews(
     } else {
         PendingIntent.FLAG_UPDATE_CURRENT
     }
-    val serviceClass = this::class.java
     fun action(action: String, requestCode: Int): PendingIntent =
-        PendingIntent.getService(
+        PendingIntent.getBroadcast(
             this,
             requestCode,
-            Intent(this, serviceClass).setAction(action).setPackage(packageName),
+            Intent(this, NotificationActionReceiver::class.java).setAction(action),
             flags
         )
 
@@ -332,17 +329,13 @@ suspend fun Service.createFluxoraNotificationBuilder(
             // collapsed state as soon as a notification carries actions, so
             // there is no custom expanded layout to maintain.
             //
-            // The intents target *this* service class, so the buttons reach the
-            // instance that built the notification (VpnService or plain
-            // service) and land in its onStartCommand.
-            // Broadcasts, not getService: service intents from a notification
-            // never reached onStartCommand here, while the getActivity one
-            // (switch) did. ownbox uses broadcasts for these same buttons.
+            // The explicit receiver also works when only the service engine
+            // exists, regardless of which service built the notification.
             fun actionIntent(action: String, requestCode: Int): PendingIntent =
                 PendingIntent.getBroadcast(
                     this@createFluxoraNotificationBuilder,
                     requestCode,
-                    Intent(action).setPackage(packageName),
+                    Intent(this@createFluxoraNotificationBuilder, NotificationActionReceiver::class.java).setAction(action),
                     flags
                 )
 
@@ -430,25 +423,4 @@ fun Service.startForeground(notification: Notification, useSpecialType: Boolean 
     }.onFailure { error ->
         android.util.Log.e("BaseServiceInterface", "startForeground fallback failed: ${error.message}")
     }.isSuccess
-}
-
-/// Registers the notification action receiver at runtime.
-///
-/// A manifest-declared receiver would be simpler, but implicit broadcasts no
-/// longer reach manifest receivers since Android 8, and `setPackage` does not
-/// exempt them — the taps then arrive nowhere and the buttons look dead. This
-/// is why ownbox registers its receiver from the service as well.
-fun Service.registerNotificationActionReceiver(): BroadcastReceiver {
-    val receiver = NotificationActionReceiver()
-    val filter = IntentFilter().apply {
-        addAction(FluxoraService.ACTION_STOP)
-        addAction(FluxoraService.ACTION_RESET)
-        addAction(FluxoraService.ACTION_SPEED_TEST)
-    }
-    if (Build.VERSION.SDK_INT >= 33) {
-        registerReceiver(receiver, filter, Context.RECEIVER_NOT_EXPORTED)
-    } else {
-        registerReceiver(receiver, filter)
-    }
-    return receiver
 }

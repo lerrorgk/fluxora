@@ -8,6 +8,7 @@ import (
 	"fmt"
 	"net"
 	"os"
+	"reflect"
 	"regexp"
 	"runtime"
 	"runtime/debug"
@@ -69,9 +70,9 @@ func recordLogHistory(entry logEntry) {
 	logHistoryHead = (logHistoryHead + 1) % maxLogHistory
 }
 
-/// Serialised for the Dart side. Always returns valid JSON — an empty array on
-/// a cold buffer or a marshal failure, never an error, so a log read can never
-/// break the page that asked for it.
+// / Serialised for the Dart side. Always returns valid JSON — an empty array on
+// / a cold buffer or a marshal failure, never an error, so a log read can never
+// / break the page that asked for it.
 func handleGetLogs() string {
 	logHistoryLock.RLock()
 	if len(logHistory) == 0 {
@@ -128,6 +129,7 @@ func handleStartListener() bool {
 		return false
 	}
 
+	listener.SetTunnelListeners(true, currentConfig.Tunnels, tunnel.Tunnel)
 	resolver.ResetConnection()
 	return true
 }
@@ -178,8 +180,35 @@ func handleValidateConfig(params *ValidateConfigParams) string {
 		defer age.SetGlobalSecretKeys()
 	}
 
-	data := patchYamlShortID([]byte(params.Data))
-	_, err := config.Parse(data)
+	data, err := age.DecryptBytes(patchYamlShortID([]byte(params.Data)))
+	if err != nil {
+		return err.Error()
+	}
+	var doc yaml.Node
+	if err := yaml.Unmarshal(data, &doc); err != nil {
+		return err.Error()
+	}
+	// The core accepts an empty document for its own defaults. An imported
+	// profile must contain a real configuration key, even in a rules-only file.
+	var fields map[string]yaml.Node
+	if err := doc.Decode(&fields); err != nil {
+		return err.Error()
+	}
+	raw := config.DefaultRawConfig()
+	schema := reflect.TypeOf(*raw)
+	recognized := false
+	for i := 0; i < schema.NumField(); i++ {
+		if _, recognized = fields[schema.Field(i).Tag.Get("yaml")]; recognized {
+			break
+		}
+	}
+	if !recognized {
+		return "profile contains no recognized Mihomo configuration fields"
+	}
+	if err := doc.Decode(raw); err != nil {
+		return err.Error()
+	}
+	_, err = config.ParseRawConfig(raw)
 	if err != nil {
 		return err.Error()
 	}
@@ -483,7 +512,7 @@ func handleSideLoadExternalProvider(providerName string, data []byte, fn func(va
 	go func() {
 		runLock.Lock()
 		defer runLock.Unlock()
-		externalProvider, exist := externalProviders[providerName]
+		externalProvider, exist := getExternalProvidersRaw()[providerName]
 		if !exist {
 			fn("external provider is not exist")
 			return
@@ -888,6 +917,7 @@ func handleSuspend(mode int) bool {
 }
 
 func init() {
+	listener.SetTunnelListeners(false, nil, nil)
 	adapter.UrlTestHook = func(url string, name string, delay uint16) {
 		delayData := &Delay{
 			Url:  url,

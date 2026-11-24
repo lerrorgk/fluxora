@@ -305,6 +305,7 @@ const _$ActionMethodEnumMap = {
   ActionMethod.resetTraffic: 'resetTraffic',
   ActionMethod.asyncTestDelay: 'asyncTestDelay',
   ActionMethod.checkDefaultRoute: 'checkDefaultRoute',
+  ActionMethod.getFixedListenerStatus: 'getFixedListenerStatus',
   ActionMethod.getConnections: 'getConnections',
   ActionMethod.closeConnections: 'closeConnections',
   ActionMethod.resetConnections: 'resetConnections',

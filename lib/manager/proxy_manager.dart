@@ -18,10 +18,9 @@ class _ProxyManagerState extends ConsumerState<ProxyManager> {
     final isStart = proxyState.isStart;
     final systemProxy = proxyState.systemProxy;
     final port = proxyState.port;
-    if (!system.isWindows) return null;
+    if (!system.isDesktop) return null;
     if (isStart && systemProxy) {
-      // B3 — records the previous system proxy first, and only claims ownership
-      // after a read-back proves the write landed.
+      // Save the original desktop settings before taking over the proxy.
       if (port <= 0) return false;
       return ProxyOwnership.apply(port: port, bypass: proxyState.bypassDomain);
     } else {

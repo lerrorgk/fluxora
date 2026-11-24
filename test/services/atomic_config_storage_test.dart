@@ -91,6 +91,18 @@ void main() {
       expect(loaded!['id'], isA<int>());
     });
 
+    test('reports a failed replacement of a read-only file', () async {
+      await storage.save({'value': 'kept'});
+      final result = await Process.run('attrib.exe', ['+R', filePath]);
+      expect(result.exitCode, 0);
+      try {
+        await expectLater(storage.save({'value': 'lost'}), throwsA(isA<FileSystemException>()));
+        expect(await storage.load(), {'value': 'kept'});
+      } finally {
+        await Process.run('attrib.exe', ['-R', filePath]);
+      }
+    }, skip: !Platform.isWindows);
+
     test('6. Empty file recovery', () async {
       await storage.save({'version': 0});
       await storage.save({'version': 1});

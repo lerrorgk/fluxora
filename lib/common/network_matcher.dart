@@ -79,6 +79,19 @@ class NetworkMatcher {
     });
   }
 
+  /// No addresses means the network is still changing. An empty rule list
+  /// always releases an existing smart pause, even during that transition.
+  static bool? shouldPause(
+    String rules,
+    List<String> addresses,
+    List<String> gateways,
+  ) {
+    if (rules.split(',').every((rule) => rule.trim().isEmpty)) return false;
+    if (addresses.isEmpty && gateways.isEmpty) return null;
+    return addresses.any((ip) => matchAny(ip, rules)) ||
+        gateways.any((gateway) => matchAnyGateway(gateway, rules));
+  }
+
   static bool isValidRule(String rule) {
     final trimmed = rule.trim();
     if (trimmed.isEmpty) return false;

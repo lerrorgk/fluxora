@@ -47,6 +47,14 @@ class WarpManager extends ChangeNotifier {
     return p.join(homeDir, 'warp_config.json');
   }
 
+  Future<void> reload() async {
+    final json = await AtomicConfigStorage(await _getConfigFilePath()).load();
+    if (json == null) throw const FormatException('Invalid WARP configuration');
+    _config = WarpConfig.fromJson(json);
+    _latestReport = null;
+    notifyListeners();
+  }
+
   Future<void> init() async {
     if (_initialized) return;
     try {

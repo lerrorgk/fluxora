@@ -131,13 +131,13 @@ void main() {
   test(
     'a verified deploy reaches configure exactly once, then health',
     () async {
-      fakeSc(
-        (args) => args.first == 'query' ? sc(1060, '', '1060') : sc(0, ''),
-      );
-
       var deployCalls = 0;
       var configureCalls = 0;
       var pingCalls = 0;
+      fakeSc((args) {
+        if (args.first != 'query') return sc(0, '');
+        return configureCalls == 0 ? sc(1060, '', '1060') : sc(0, 'STATE : 4 RUNNING');
+      });
 
       Windows.deployHelperAssetsOverrideForTest = () async {
         deployCalls++;

@@ -3,6 +3,7 @@ import 'dart:io';
 import 'package:collection/collection.dart';
 import 'package:flutter/foundation.dart';
 
+import 'package:fluxora/clash/clash.dart';
 import 'package:fluxora/common/common.dart';
 import 'package:fluxora/manager/chain_proxy_manager.dart';
 import 'package:fluxora/models/chain_proxy.dart';
@@ -14,10 +15,18 @@ import 'package:path/path.dart' as p;
 import 'package:synchronized/synchronized.dart';
 
 class FixedProxyRoutes extends ChangeNotifier {
+  FixedProxyRoutes({Future<Map<String, String>> Function()? readBindings})
+      : _readBindings = readBindings ?? (() => clashCore.clashInterface.getFixedListenerStatus());
+
+  final Future<Map<String, String>> Function() _readBindings;
   final _lock = Lock();
+  final _bindingLock = Lock();
   final _routes = <FixedProxyRoute>[];
   List<FixedProxyRoute> get routes => List.unmodifiable(_routes);
   final issues = <int, String>{};
+  Map<String, String> _bindings = {};
+  DateTime? _bindingSession;
+  int _bindingRequest = 0;
   bool _loaded = false;
   final _reports =
       <int, ({DateTime? session, int? path, FixedRouteReport result})>{};
@@ -28,7 +37,7 @@ class FixedProxyRoutes extends ChangeNotifier {
         !globalState.isStart ||
         entry.session != globalState.startTime ||
         entry.path != _paths[port] ||
-        issues.containsKey(port)) {
+        issueFor(port) != null) {
       return null;
     }
     return entry.result;
@@ -45,30 +54,75 @@ class FixedProxyRoutes extends ChangeNotifier {
   Map<int, int> _paths = {};
   int? pathSignature(int port) => _paths[port];
 
+  String? issueFor(int port) {
+    if (issues.containsKey(port)) return issues[port];
+    if (!globalState.isStart) return null;
+    final status = _bindingSession == globalState.startTime
+        ? _bindings['fluxora-fixed-$port']
+        : null;
+    if (status == '') return null;
+    return status ?? 'Listener binding could not be confirmed';
+  }
+
+  Future<void> refreshBindings() => _bindingLock.synchronized(() async {
+    final request = _bindingRequest;
+    final session = globalState.startTime;
+    if (session == null || !routes.any((r) => r.enabled)) return;
+    Map<String, String> status = {};
+    try {
+      status = await _readBindings();
+    } catch (e) {
+      commonPrint.log('Fixed proxy listener status unavailable: $e');
+    }
+    if (request != _bindingRequest || session != globalState.startTime) return;
+    if (_bindingSession == session && mapEquals(_bindings, status)) return;
+    _bindings = status;
+    _bindingSession = session;
+    _reports.removeWhere((port, _) => issueFor(port) != null);
+    notifyListeners();
+  });
+
   Future<AtomicConfigStorage> _storage() async => AtomicConfigStorage(
     p.join(await appPath.homeDirPath, 'fixed_proxy_routes.json'),
   );
 
   Future<void> load() => _lock.synchronized(() async {
-    if (_loaded) return;
+    if (!_loaded) await _readRoutes();
+  });
+
+  Future<void> reload() => _lock.synchronized(() async {
+    await _readRoutes();
+    ++_bindingRequest;
+    _bindingSession = null;
+    _bindings.clear();
+    _paths.clear();
+    issues.clear();
+    _reports.clear();
+    notifyListeners();
+  });
+
+  Future<void> _readRoutes() async {
     final storage = await _storage();
     final data = await storage.load();
+    List<FixedProxyRoute> routes = [];
     if (data != null) {
       if (data['version'] != 1) {
         throw const FormatException('Unsupported fixed proxy configuration');
       }
-      final routes = (data['routes'] as List)
+      routes = (data['routes'] as List)
           .map((json) => FixedProxyRoute.fromJson(json as Map<String, dynamic>))
           .toList();
       if (routes.map((r) => r.port).toSet().length != routes.length) {
         throw const FormatException('Duplicate fixed proxy port');
       }
-      _routes.addAll(routes);
     } else if (await File(storage.filePath).exists()) {
       throw const FormatException('Cannot read fixed proxy configuration');
     }
+    _routes
+      ..clear()
+      ..addAll(routes);
     _loaded = true;
-  });
+  }
 
   /// Store references only. Credentials are resolved from their original
   /// subscription or the landing library each time a core config is built.

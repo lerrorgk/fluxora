@@ -418,6 +418,23 @@ class ChainProxyManager extends ChangeNotifier {
     // automatic failover path was unreachable even though the flag was stored.
   }
 
+  Future<void> reloadBackupConfiguration() async {
+    final chainPath = await _getConfigFilePath();
+    final poolPath = await _getFallbackPoolFilePath();
+    final chain = await AtomicConfigStorage(
+      chainPath,
+    ).load(accept: PersistenceSchema.accepts);
+    final pool = await AtomicConfigStorage(
+      poolPath,
+    ).load(accept: PersistenceSchema.accepts);
+    if (chain != null) _config = ChainProxyConfig.fromJson(chain);
+    if (pool != null) _fallbackPool = ChainFallbackPool.fromJson(pool);
+    _delays.clear();
+    _healthReports.clear();
+    _scheduleFreshnessTick();
+    notifyListeners();
+  }
+
   Future<void> _saveConfig() async {
     final filePath = await _getConfigFilePath();
     // P2.4-A: crash-safe atomic write (tmp → validate → .bak → rename).

@@ -1,5 +1,7 @@
 import 'dart:io';
 
+import 'package:flutter/services.dart';
+
 import "package:path/path.dart";
 
 import 'proxy_platform_interface.dart';
@@ -8,6 +10,16 @@ enum ProxyTypes { http, https, socks }
 
 class Proxy extends ProxyPlatform {
   static String url = "127.0.0.1";
+  static const _windows = MethodChannel('proxy');
+
+  Future<bool?> startOwnedWindowsProxy(int port, List<String> bypass) =>
+      _windows.invokeMethod<bool>('StartProxy', {
+        'port': port, 'bypassDomain': bypass, 'own': true,
+      });
+
+  /// Null when the snapshot belongs to an earlier process.
+  Future<bool?> releaseWindowsSessionProxy() =>
+      _windows.invokeMethod<bool>('ReleaseSessionProxy');
 
   @override
   Future<bool?> startProxy(

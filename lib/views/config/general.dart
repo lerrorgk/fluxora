@@ -911,8 +911,9 @@ class ExternalControllerItem extends ConsumerWidget {
                         icon: const Icon(Icons.open_in_new),
                         tooltip: appLocalizations.onlinePanel,
                         onPressed: () async {
-                          final uri = Uri.parse(
-                            'http://127.0.0.1:9090/ui/#/setup?hostname=127.0.0.1&port=9090&secret=$secret',
+                          final uri = externalControllerPanelUri(
+                            globalState.appController.effectiveExternalController,
+                            secret,
                           );
                           if (await canLaunchUrl(uri)) {
                             await launchUrl(

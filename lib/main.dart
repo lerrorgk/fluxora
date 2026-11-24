@@ -342,24 +342,24 @@ Future<void> _service(List<String> flags) async {
 
     Future<void> checkSmartAutoStop() async {
       try {
-        final vpnProps = globalState.config.vpnProps;
-        if (!vpnProps.smartAutoStop) return;
-        final networks = vpnProps.smartAutoStopNetworks;
-        if (networks.isEmpty) return;
-
         await smartAutoStopLock.synchronized(() async {
+          // The UI and the background engine have separate prefs caches.
+          final prefs = await preferences.sharedPreferencesCompleter.future;
+          await prefs?.reload();
+          final settings = await preferences.getConfig() ?? globalState.config;
+          final vpnProps = settings.vpnProps;
           final isSmartStopped = await vpn?.isSmartStopped() ?? false;
+          if (!vpnProps.smartAutoStop && !isSmartStopped) return;
           final candidateIps =
               await vpn?.getLocalIpAddresses() ?? const <String>[];
           final candidateGateways =
               await vpn?.getLocalGateways() ?? const <String>[];
-          if (candidateIps.isEmpty && candidateGateways.isEmpty) return;
-
-          final shouldStop =
-              candidateIps.any((ip) => NetworkMatcher.matchAny(ip, networks)) ||
-              candidateGateways.any(
-                (gw) => NetworkMatcher.matchAnyGateway(gw, networks),
-              );
+          final shouldStop = NetworkMatcher.shouldPause(
+            vpnProps.smartAutoStop ? vpnProps.smartAutoStopNetworks : '',
+            candidateIps,
+            candidateGateways,
+          );
+          if (shouldStop == null) return;
 
           if (shouldStop && !isSmartStopped) {
             final isRunning = await vpn?.getStatus() ?? false;

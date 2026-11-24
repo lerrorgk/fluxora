@@ -27,11 +27,17 @@ import 'package:tray_manager/tray_manager.dart';
 import 'package:wakelock_plus/wakelock_plus.dart';
 import 'package:yaml/yaml.dart';
 
-import 'common/archive.dart' show restoreBackupFiles;
+import 'common/archive.dart' show FluxoraBackupFiles, legacyBackupAccessControl, restoreBackupFiles, routingBackupFiles;
 import 'common/common.dart';
 import 'common/external_control.dart';
 import 'common/flclash_database_extractor.dart';
 import 'manager/chain_proxy_manager.dart';
+import 'manager/fixed_proxy_routes.dart';
+import 'manager/profile_chain_manager.dart';
+import 'manager/warp_manager.dart';
+import 'models/fixed_proxy_route.dart';
+import 'models/warp_config.dart';
+import 'services/persistence_schema.dart';
 import 'services/network_fingerprint_provider.dart';
 import 'services/system_proxy_readback.dart';
 import 'services/tun_readback.dart';
@@ -67,7 +73,7 @@ class AppController {
   Timer? _updateGroupsRetryTimer;
   int _coreGeneration = 0;
   final Set<DelayTestTarget> _manualDelayTargets = {};
-  final Set<String> _updatingProfileIds = {};
+  final Map<String, Completer<void>> _profileUpdates = {};
   Timer? _idleGcTimer;
   int _localIpRequest = 0;
 
@@ -79,7 +85,7 @@ class AppController {
   /// Callers must use this instead of `AppController(newContext, ref)`. A second
   /// instance would orphan the first one and split the per-instance guards
   /// (`_coreLifecycleLock`, `_coreGeneration`, `_isUpdatingGroups`,
-  /// `_updatingProfileIds`) across two objects, silently breaking the
+  /// `_profileUpdates`) across two objects, silently breaking the
   /// single-flight and stale-result guarantees they exist to provide.
   void rebindContext(BuildContext newContext) {
     context = newContext;
@@ -454,7 +460,7 @@ class AppController {
   }
 
   Future<bool> _setupCoreConfig({bool requireRequestedTun = false}) async {
-    final currentProfile = _ref.read(currentProfileProvider);
+    var currentProfile = _ref.read(currentProfileProvider);
     if (currentProfile == null) {
       return false;
     }
@@ -463,7 +469,18 @@ class AppController {
     if (!globalState.isStart && !_ref.read(runTimeProvider.notifier).isStart) {
       await _resolveMixedPortFallback();
     }
-    await currentProfile.checkAndUpdate();
+    if (currentProfile.type == ProfileType.url && !await currentProfile.check()) {
+      final requestedId = currentProfile.id;
+      await updateProfile(currentProfile, applyAfterUpdate: false);
+      if (!context.mounted) return false;
+      final refreshed = _ref.read(currentProfileProvider);
+      if (refreshed == null ||
+          refreshed.id != requestedId ||
+          !await refreshed.check()) {
+        return false;
+      }
+      currentProfile = refreshed;
+    }
     final patchConfig = _ref.read(patchClashConfigProvider);
     final controllerEnabled = patchConfig.externalController == ExternalControllerStatus.open ||
         await _forceLoopbackController();
@@ -510,6 +527,7 @@ class AppController {
     _ref.read(appliedMixedPortProvider.notifier).state = effectivePatchConfig.mixedPort;
     _controllerPortResolved = controllerEnabled;
     _appliedProfileId = currentProfile.id;
+    if (globalState.isStart) await fixedProxyRoutes.refreshBindings();
     if (system.isDesktop) {
       final prefs = await preferences.sharedPreferencesCompleter.future;
       await prefs?.setBool('is_tun_running', realTunEnable);
@@ -661,6 +679,7 @@ class AppController {
   }
 
   Future<void> deleteProfile(String id) async {
+    _profileUpdates.remove(id);
     _ref.read(profilesProvider.notifier).deleteProfileById(id);
     await clearEffect(id);
     if (globalState.config.currentProfileId == id) {
@@ -685,35 +704,113 @@ class AppController {
     final request = ++_localIpRequest;
     var address = globalState.appState.localIp ?? '';
     try {
-      address = await utils.getLocalIpAddress() ?? '';
+      address =
+          await utils.getLocalIpAddress().timeout(const Duration(seconds: 5)) ??
+          '';
     } catch (e) {
       commonPrint.log('Failed to read local IP: $e');
     }
-    if (request == _localIpRequest && context.mounted) {
-      _ref.read(localIpProvider.notifier).value = address;
-    }
+    if (request != _localIpRequest) return;
+
+    // 先保存结果：首页未挂载、provider 已释放时也能在下次打开时读取。
+    globalState.appState = globalState.appState.copyWith(localIp: address);
+    if (!context.mounted || !_ref.exists(localIpProvider)) return;
+    _ref.read(localIpProvider.notifier).value = address;
   }
 
-  Future<void> updateProfile(Profile profile, {bool validate = true}) async {
-    if (_updatingProfileIds.contains(profile.id)) {
-      _ref
-          .read(profilesProvider.notifier)
-          .setProfile(profile.copyWith(isUpdating: false));
+  Future<void> updateProfile(
+    Profile profile, {
+    Profile Function(Profile)? edit,
+    Uint8List? fileData,
+    bool applyAfterUpdate = true,
+  }) async {
+    final id = profile.id;
+    final before = _ref.read(profilesProvider).getProfile(id);
+    if (before == null ||
+        before.url != profile.url ||
+        before.ageSecretKey != profile.ageSecretKey) {
       return;
     }
-    _updatingProfileIds.add(profile.id);
+    final pending = _profileUpdates[id];
+    if (edit == null && pending != null) return pending.future;
+    final token = Completer<void>();
+    _profileUpdates[id] = token;
+    token.complete(
+      _refreshProfile(
+        before,
+        token,
+        edit: edit,
+        fileData: fileData,
+        applyAfterUpdate: applyAfterUpdate,
+      ),
+    );
+    return token.future;
+  }
+
+  Future<void> _refreshProfile(
+    Profile before,
+    Completer<void> token, {
+    required Profile Function(Profile)? edit,
+    required Uint8List? fileData,
+    required bool applyAfterUpdate,
+  }) async {
+    final id = before.id;
+    Profile? current() => _ref.read(profilesProvider).getProfile(id);
+    bool canCommit() {
+      if (!context.mounted || _profileUpdates[id] != token) return false;
+      final latest = current();
+      return latest != null &&
+          latest.url == before.url &&
+          latest.ageSecretKey == before.ageSecretKey &&
+          latest.lastUpdateDate == before.lastUpdateDate;
+    }
+
     try {
-      var newProfile = await profile.update(validate: validate);
-      // 更新是整体覆盖订阅文件，手动添加的节点会跟着消失；把它们补回去。
-      newProfile = await ManualProxyHelper.restoreManualProxies(newProfile);
+      final source = edit?.call(before) ?? before;
       _ref
           .read(profilesProvider.notifier)
-          .setProfile(newProfile.copyWith(isUpdating: false));
-      if (profile.id == _ref.read(currentProfileIdProvider)) {
+          .updateProfile(id, (p) => p.copyWith(isUpdating: true));
+      final updated = fileData == null
+          ? await source.update(
+              canCommit: canCommit,
+              mergeManualNodes: (content) =>
+                  ManualProxyHelper.mergeSavedProxies(source, content),
+            )
+          : await source.saveFile(fileData, canCommit: canCommit);
+      if (!canCommit()) return;
+      final latest = current()!;
+      var base = edit?.call(latest) ?? latest;
+      if (fileData == null &&
+          updated.portalSource == ProfilePortalSource.subscription) {
+        base = base.withSubscriptionPortalHeader(updated.portalUrl);
+      }
+      _ref
+          .read(profilesProvider.notifier)
+          .setProfile(
+            base.copyWith(
+              label:
+                  base.label ?? (source.label == null ? updated.label : null),
+              lastUpdateDate: updated.lastUpdateDate,
+              subscriptionInfo: fileData == null
+                  ? updated.subscriptionInfo
+                  : base.subscriptionInfo,
+              isUpdating: false,
+            ),
+          );
+      if (applyAfterUpdate && id == _ref.read(currentProfileIdProvider)) {
         applyProfileDebounce(silence: true);
       }
+    } catch (_) {
+      if (canCommit()) rethrow;
     } finally {
-      _updatingProfileIds.remove(profile.id);
+      if (_profileUpdates[id] == token) {
+        _profileUpdates.remove(id);
+        if (context.mounted && current()?.isUpdating == true) {
+          _ref
+              .read(profilesProvider.notifier)
+              .updateProfile(id, (p) => p.copyWith(isUpdating: false));
+        }
+      }
     }
   }
 
@@ -721,9 +818,11 @@ class AppController {
     _ref.read(profilesProvider.notifier).setProfile(profile);
   }
 
-  void setProfileAndAutoApply(Profile profile) {
-    _ref.read(profilesProvider.notifier).setProfile(profile);
-    if (profile.id == _ref.read(currentProfileIdProvider)) {
+  void editProfile(String id, Profile Function(Profile) edit) {
+    final current = _ref.read(profilesProvider).getProfile(id);
+    if (current == null) return;
+    _ref.read(profilesProvider.notifier).setProfile(edit(current));
+    if (id == _ref.read(currentProfileIdProvider)) {
       applyProfileDebounce(silence: true);
     }
   }
@@ -1294,21 +1393,10 @@ class AppController {
         WidgetsBinding.instance.platformDispatcher.platformBrightness;
   }
 
-  bool _isProfileUpdateNeeded(Profile profile) {
-    if (!profile.autoUpdate) return false;
-    if (profile.type == ProfileType.file) return false;
-    if (profile.isUpdating) return false;
-    final lastUpdate = profile.lastUpdateDate;
-    if (lastUpdate == null) return true;
-    final expectedNextUpdate = lastUpdate.add(profile.autoUpdateDuration);
-    return DateTime.now().difference(expectedNextUpdate) >
-        const Duration(minutes: 1);
-  }
-
   Future<void> autoUpdateProfiles() async {
     // P2.6-D: the loop head used to read the provider *outside* any boundary, so
     // a throwing read (e.g. the provider container is already disposed) escaped
-    // the method entirely. Both call sites are fire-and-forget — the 24h timer
+    // the method entirely. Both call sites are fire-and-forget — the periodic timer
     // in `application.dart` and `init()` below — so it surfaced as an unhandled
     // async error with no `await` above it to catch it.
     //
@@ -1317,9 +1405,9 @@ class AppController {
     // `try` is unchanged, so one bad profile still does not stop the others.
     try {
       for (final profile in _ref.read(profilesProvider)) {
-        if (!_isProfileUpdateNeeded(profile)) continue;
+        if (!profile.isUpdateDue(DateTime.now())) continue;
         try {
-          await updateProfile(profile, validate: false);
+          await updateProfile(profile);
         } catch (e) {
           commonPrint.log(
             '[AutoUpdate] Failed to update ${profile.label ?? profile.id}: ${e.formatErrorLog}',
@@ -1339,7 +1427,7 @@ class AppController {
     // behaviour — the throw aborted the run before `_syncExternalProviders()`.
     try {
       for (final profile in _ref.read(profilesProvider)) {
-        if (!_isProfileUpdateNeeded(profile)) continue;
+        if (!profile.isUpdateDue(DateTime.now())) continue;
         profilesToUpdate.add(profile);
       }
     } catch (e, stackTrace) {
@@ -1352,7 +1440,7 @@ class AppController {
       var updated = false;
       for (final profile in profilesToUpdate) {
         try {
-          await updateProfile(profile, validate: false);
+          await updateProfile(profile);
           updated = true;
         } catch (e) {
           commonPrint.log(
@@ -3063,116 +3151,24 @@ class AppController {
   }
 
   Future<List<int>> backupData() async {
-    final homeDirPath = await appPath.homeDirPath;
-    final profilesPath = await appPath.profilesPath;
-    final configJson = globalState.config.toJson();
-
-    // Get valid profile IDs
-    final validProfileIds = globalState.config.profiles
-        .map((p) => p.id)
-        .toSet();
-    final currentProfileId = globalState.config.currentProfileId;
-
-    commonPrint.log(
-      'Starting backup: ${validProfileIds.length} profiles, current: $currentProfileId',
+    final home = await appPath.homeDirPath;
+    final config = globalState.config;
+    final configJson = jsonEncode(config);
+    final files = FluxoraBackupFiles(
+      config.profiles.map((p) => p.id).toSet(),
+      config.scriptProps.scripts.map((s) => s.id).toSet(),
     );
-
-    return Isolate.run<List<int>>(() async {
-      // Use ZipFileEncoder like FLClash - more reliable than ZipEncoder + Archive
-      final tempDir = Directory.systemTemp;
-      final tempZipPath = join(
-        tempDir.path,
-        'fluxora_backup_${DateTime.now().millisecondsSinceEpoch}.zip',
-      );
-      final encoder = ZipFileEncoder();
-      encoder.create(tempZipPath);
-
-      // Add marker file
-      final markerData = json.encode({
-        'app': 'Fluxora',
-        'version': '1.0',
-        'timestamp': DateTime.now().millisecondsSinceEpoch,
-      });
-      final markerBytes = utf8.encode(markerData);
-      final tempMarkerFile = File(
-        join(
-          tempDir.path,
-          'fluxora_marker_${DateTime.now().millisecondsSinceEpoch}.tmp',
-        ),
-      );
-      await tempMarkerFile.writeAsBytes(markerBytes);
-      await encoder.addFile(tempMarkerFile, '.fluxora_marker');
-      await tempMarkerFile.delete();
-
-      // Add config file
-      final configStr = json.encode(configJson);
-      final tempConfigFile = File(
-        join(
-          tempDir.path,
-          'fluxora_config_${DateTime.now().millisecondsSinceEpoch}.tmp',
-        ),
-      );
-      await tempConfigFile.writeAsString(configStr);
-      await encoder.addFile(tempConfigFile, 'config.json');
-      await tempConfigFile.delete();
-
-      // Add profiles dir (valid subscriptions only)
-      final profilesDir = Directory(profilesPath);
-      if (await profilesDir.exists()) {
-        final files = await profilesDir
-            .list(recursive: false)
-            .toList(); // First level only
-
-        for (final file in files) {
-          if (file is File) {
-            // Check if valid subscription config
-            final fileName = basename(file.path);
-            final profileId = fileName.replaceAll(RegExp(r'\.(yaml|yml)$'), '');
-
-            if (validProfileIds.contains(profileId)) {
-              // Normalize path: use Unix-style / separator
-              final relativePath = relative(
-                file.path,
-                from: homeDirPath,
-              ).replaceAll('\\', '/');
-              await encoder.addFile(file, relativePath);
-            }
-          }
-        }
-
-        // Add current active subscription Providers
-        if (currentProfileId != null &&
-            validProfileIds.contains(currentProfileId)) {
-          final providersDir = Directory(
-            join(profilesPath, 'providers', currentProfileId),
-          );
-
-          if (await providersDir.exists()) {
-            final providerFiles = await providersDir
-                .list(recursive: true)
-                .toList();
-
-            for (final providerFile in providerFiles) {
-              if (providerFile is File) {
-                final relativePath = relative(
-                  providerFile.path,
-                  from: homeDirPath,
-                ).replaceAll('\\', '/');
-                await encoder.addFile(providerFile, relativePath);
-              }
-            }
-          }
-        }
-      }
-
-      encoder.close();
-
-      // Read the zip file and return bytes
-      final zipFile = File(tempZipPath);
-      final bytes = await zipFile.readAsBytes();
-      await zipFile.delete();
-      return bytes;
-    });
+    final defaultFiles = <String, Object?>{
+      'fixed_proxy_routes.json': {
+        'version': 1,
+        'routes': [for (final route in fixedProxyRoutes.routes) route.toJson()],
+      },
+      'profile_chains.json': <String, dynamic>{},
+      'chain_proxies.json': chainProxyManager.config.toJson(),
+      'chain_fallback_pool.json': chainProxyManager.fallbackPool.toJson(),
+      'warp_config.json': warpManager.config.toJson(),
+    };
+    return Isolate.run(() => files.encode(home, configJson, defaultFiles));
   }
 
   Future<void> updateTray([
@@ -3277,37 +3273,86 @@ class AppController {
     RecoveryOption recoveryOption,
     String homeDirPath,
   ) async {
-    // Separate config and profile files
-    final configs = archive.files
-        .where(
-          (item) =>
-              item.name.endsWith('.json') && item.name != '.fluxora_marker',
-        )
-        .toList();
-    final profiles = archive.files.where(
-      (item) => !item.name.endsWith('.json') && item.name != '.fluxora_marker',
-    );
-
-    // Find config.json
-    final configIndex = configs.indexWhere(
-      (config) => config.name == 'config.json',
-    );
-    if (configIndex == -1) throw 'invalid backup file';
-
-    // Parse config
-    final configFile = configs[configIndex];
-    final configContent = configFile.content;
-    if (configContent.isEmpty) {
-      throw 'Config file is empty or corrupted';
+    final configFile = archive.find('config.json');
+    if (configFile == null || configFile.content.isEmpty) {
+      throw const FormatException('Missing backup config.json');
     }
-    var tempConfig = Config.compatibleFromJson(
-      json.decode(utf8.decode(configContent)),
+    final restored = Config.compatibleFromJson(
+      jsonDecode(utf8.decode(configFile.content)),
     );
+    final manifest = FluxoraBackupFiles(
+      restored.profiles.map((p) => p.id).toSet(),
+      restored.scriptProps.scripts.map((s) => s.id).toSet(),
+    );
+    final all = recoveryOption == RecoveryOption.all;
+    if (all) _validateRoutingBackup(archive);
+    final entries = archive.files.where(
+      (f) => manifest.includes(f.name.replaceAll('\\', '/'), all: all),
+    );
+    await restoreBackupFiles(entries, homeDirPath);
+    if (all) {
+      if (archive.find('chain_proxies.json') != null ||
+          archive.find('chain_fallback_pool.json') != null) {
+        await chainProxyManager.reloadBackupConfiguration();
+      }
+      if (archive.find('profile_chains.json') != null) {
+        await profileChainManager.reload();
+      }
+      if (archive.find('warp_config.json') != null) await warpManager.reload();
+      if (archive.find('fixed_proxy_routes.json') != null) {
+        await fixedProxyRoutes.reload();
+      }
+    }
+    _recovery(restored, recoveryOption);
+    await _finishRecovery();
+  }
 
-    await restoreBackupFiles(profiles, homeDirPath);
+  void _validateRoutingBackup(Archive archive) {
+    for (final name in routingBackupFiles) {
+      final file = archive.find(name);
+      if (file == null) continue;
+      final data =
+          jsonDecode(utf8.decode(file.content)) as Map<String, dynamic>;
+      switch (name) {
+        case 'fixed_proxy_routes.json':
+          if (data['version'] != 1) {
+            throw const FormatException('Unsupported fixed proxy configuration');
+          }
+          final ports = <int>{};
+          for (final item in data['routes'] as List) {
+            final route = FixedProxyRoute.fromJson(
+              item as Map<String, dynamic>,
+            );
+            if (route.port < 1 ||
+                route.port > 65535 ||
+                route.hops.isEmpty ||
+                !ports.add(route.port)) {
+              throw const FormatException('Invalid fixed proxy route');
+            }
+          }
+        case 'chain_proxies.json':
+        case 'chain_fallback_pool.json':
+          if (!PersistenceSchema.accepts(data)) {
+            throw FormatException('Unsupported $name');
+          }
+          if (name == 'chain_proxies.json') {
+            ChainProxyConfig.fromJson(data);
+          } else {
+            ChainFallbackPool.fromJson(data);
+          }
+        case 'profile_chains.json':
+          for (final item in data.values) {
+            ProfileChainConfig.fromJson(item as Map<String, dynamic>);
+          }
+        case 'warp_config.json':
+          WarpConfig.fromJson(data);
+      }
+    }
+  }
 
-    // Apply recovery logic
-    _recovery(tempConfig, recoveryOption);
+  Future<void> _finishRecovery() async {
+    await savePreferences();
+    if (globalState.isStart) await applyProfile(silence: true);
   }
 
   /// Restore legacy
@@ -3339,11 +3384,9 @@ class AppController {
     if (configContent.isEmpty) {
       throw 'Config file is empty or corrupted';
     }
-    final backupConfig = Config.compatibleFromJson(
-      json.decode(utf8.decode(configContent)),
-    );
-
-    await restoreBackupFiles(profileFiles, homeDirPath);
+    final rawConfig =
+        json.decode(utf8.decode(configContent)) as Map<String, dynamic>;
+    final backupConfig = Config.compatibleFromJson(rawConfig);
 
     // Extract profiles from backup
     List<Profile> profiles = [];
@@ -3390,7 +3433,9 @@ class AppController {
       } else {
         // Extract ID from profile file names (FlClash mode)
         for (final profileFile in profileFiles) {
-          final fileName = profileFile.name.split('/').last;
+          final path = profileFile.name.replaceAll('\\', '/');
+          if (posix.dirname(path) != 'profiles') continue;
+          final fileName = posix.basename(path);
           if (fileName.endsWith('.yaml') || fileName.endsWith('.yml')) {
             final id = fileName.replaceAll(RegExp(r'\.(yaml|yml)$'), '');
 
@@ -3411,44 +3456,26 @@ class AppController {
       }
     }
 
-    // Create limited recovery config (subscriptions only)
-    Config limitedConfig = globalState.config.copyWith(profiles: profiles);
-
-    // Android: also restore app list
-    if (system.isAndroid) {
-      // FlClash uses accessControlProps instead of accessControl
-      final vpnProps = backupConfig.vpnProps;
-      AccessControl? accessControl;
-
-      // Try to get from vpnProps.accessControl
-      try {
-        accessControl = vpnProps.accessControl;
-      } catch (_) {
-        // Fallback: try accessControlProps from raw JSON
-        try {
-          final configJson = json.decode(utf8.decode(configFile.content));
-          final vpnPropsJson = configJson['vpnProps'];
-          if (vpnPropsJson != null && vpnPropsJson is Map) {
-            final accessControlPropsJson = vpnPropsJson['accessControlProps'];
-            if (accessControlPropsJson != null &&
-                accessControlPropsJson is Map) {
-              accessControl = AccessControl.fromJson(
-                Map<String, dynamic>.from(accessControlPropsJson),
-              );
-            }
-          }
-        } catch (_) {}
-      }
-
-      if (accessControl != null) {
-        limitedConfig = limitedConfig.copyWith.vpnProps(
-          accessControl: accessControl,
-        );
-      }
+    final manifest = FluxoraBackupFiles(profiles.map((p) => p.id).toSet(), {});
+    await restoreBackupFiles(
+      archive.files.where(
+        (f) => manifest.includes(f.name.replaceAll('\\', '/'), all: false),
+      ),
+      homeDirPath,
+    );
+    final control = legacyBackupAccessControl(
+      rawConfig,
+      restoreAll: recoveryOption == RecoveryOption.all,
+    );
+    _restoreProfiles(profiles);
+    if (system.isAndroid && control != null) {
+      final selection = AccessControl.fromJson(control);
+      _ref
+          .read(vpnSettingProvider.notifier)
+          .updateState((state) => state.copyWith(accessControl: selection));
     }
-
-    // Apply limited recovery
-    _recoveryLimited(limitedConfig, recoveryOption);
+    _ensureCurrentProfile(profiles);
+    await _finishRecovery();
 
     // Show recovery result message
     _showRecoveryResultMessage(profiles, extractedFromDatabase);
@@ -3540,27 +3567,6 @@ class AppController {
     }
   }
 
-  /// Partial restore
-  void _recoveryLimited(Config config, RecoveryOption recoveryOption) {
-    final profiles = config.profiles;
-
-    // Restore subscriptions
-    _restoreProfiles(profiles);
-
-    // Android: restore app list
-    if (system.isAndroid) {
-      _ref
-          .read(vpnSettingProvider.notifier)
-          .updateState(
-            (state) =>
-                state.copyWith(accessControl: config.vpnProps.accessControl),
-          );
-    }
-
-    // Ensure current profile exists
-    _ensureCurrentProfile(profiles);
-  }
-
   /// Full restore
   void _recovery(Config config, RecoveryOption recoveryOption) {
     final profiles = config.profiles;
@@ -3639,8 +3645,32 @@ class AppController {
       _ref.read(proxiesStyleSettingProvider.notifier).value =
           config.proxiesStyle;
 
-      // 9. Restore DNS override settings
       _ref.read(overrideDnsProvider.notifier).value = config.overrideDns;
+      _ref.read(overrideNtpProvider.notifier).value = config.overrideNtp;
+      _ref.read(overrideSnifferProvider.notifier).value =
+          config.overrideSniffer;
+      _ref.read(overrideTunnelProvider.notifier).value = config.overrideTunnel;
+      _ref.read(overrideExperimentalProvider.notifier).value =
+          config.overrideExperimental;
+      _ref.read(overrideTestUrlProvider.notifier).value =
+          config.overrideTestUrl;
+      _ref.read(nodeExcludeFilterProvider.notifier).value =
+          config.nodeExcludeFilter;
+      _ref.read(healthCheckTimeoutProvider.notifier).value =
+          config.healthCheckTimeout;
+      globalState.config = globalState.config.copyWith(
+        aggregates: config.aggregates,
+        currentAggregateId: config.currentAggregateId,
+        aggregateMode: config.aggregateMode,
+        aggregateScriptTiming: config.aggregateScriptTiming,
+        aggregateMergeNodes: config.aggregateMergeNodes,
+        aggregateMergeGroups: config.aggregateMergeGroups,
+        aggregateMergeRules: config.aggregateMergeRules,
+        aggregateMergeRuleProviders: config.aggregateMergeRuleProviders,
+        aggregateMergeMemberScripts: config.aggregateMergeMemberScripts,
+        aggregateApplyNodeOverrides: config.aggregateApplyNodeOverrides,
+        aggregateOverrideData: config.aggregateOverrideData,
+      );
 
       // 10. Restore hotkey settings (desktop only)
       if (system.isDesktop) {

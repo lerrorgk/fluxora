@@ -34,7 +34,6 @@ import (
 	"github.com/metacubex/mihomo/dns"
 	"github.com/metacubex/mihomo/listener"
 	authStore "github.com/metacubex/mihomo/listener/auth"
-	LC "github.com/metacubex/mihomo/listener/config"
 	"github.com/metacubex/mihomo/listener/inner"
 	"github.com/metacubex/mihomo/listener/tproxy"
 	"github.com/metacubex/mihomo/log"
@@ -107,7 +106,7 @@ func ApplyConfig(cfg *config.Config, force bool) {
 	// updateListeners(cfg.General, cfg.Listeners, force)
 	// updateTun(cfg.General) // tun should not care "force"
 	updateIPTables(cfg)
-	updateTunnels(cfg.Tunnels)
+	listener.PatchTunnel(cfg.Tunnels, tunnel.Tunnel)
 
 	tunnel.OnInnerLoading()
 
@@ -365,10 +364,6 @@ func updateSniffer(snifferConfig *sniffer.Config) {
 	} else {
 		log.Infoln("Sniffer is closed")
 	}
-}
-
-func updateTunnels(tunnels []LC.Tunnel) {
-	listener.PatchTunnel(tunnels, tunnel.Tunnel)
 }
 
 func updateUpdater(cfg *config.Config) {

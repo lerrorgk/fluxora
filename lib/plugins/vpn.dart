@@ -189,9 +189,22 @@ class Vpn {
           // existing recovery path, and it rebuilds DNS and every upstream at
           // once. A reset that leaves a broken resolver in place is not a reset.
           commonPrint.log('notificationReset: restarting core');
-          await globalState.appController.restartCore();
-          // The notification flash already happened natively when the button
-          // was pressed, so it stays visible even if this path is slow.
+          if (globalState.isService) {
+            // The tile can cold-start only the service engine. It already owns
+            // the native core and the effective config.yaml written on startup.
+            final handler = clashLibHandler!;
+            final prefs = await preferences.sharedPreferencesCompleter.future;
+            await prefs?.reload();
+            final settings = await preferences.getConfig() ?? globalState.config;
+            final setup = SetupParams(
+              selectedMap: settings.currentProfile?.selectedMap ?? const {},
+              testUrl: settings.appSetting.testUrl,
+              overrideTestUrl: settings.overrideTestUrl,
+            );
+            await resetHeadlessCore(setup, handler.invokeAction);
+          } else {
+            await globalState.appController.restartCore();
+          }
           break;
         case 'notificationSpeedTest':
           final controller = globalState.appController;
@@ -233,6 +246,28 @@ class Vpn {
   }
 
   Future<bool?> stop() => methodChannel.invokeMethod<bool>('stop');
+
+  static Future<void> resetHeadlessCore(
+    SetupParams setup,
+    Future<String> Function(String) invoke,
+  ) async {
+    for (final method in [
+      'closeConnections',
+      'flushFakeIP',
+      'flushDnsCache',
+      'setupConfig',
+    ]) {
+      final reply = jsonDecode(await invoke(jsonEncode({
+        'id': 'notificationReset-$method',
+        'method': method,
+        if (method == 'setupConfig') 'data': jsonEncode(setup),
+      }))) as Map;
+      final data = reply['data'];
+      if (reply['code'] != 0 || (method == 'setupConfig' && data != '')) {
+        throw StateError('Notification reset failed at $method: $data');
+      }
+    }
+  }
 
   Future<List<String>> getLocalIpAddresses() async {
     return await methodChannel.invokeListMethod<String>(
