@@ -11,6 +11,7 @@ void main(List<String> arguments) async {
   final parser = ArgParser()
     ..addOption('arch', allowed: ['amd64', 'arm64'], mandatory: true)
     ..addFlag('compatible', defaultsTo: false)
+    ..addFlag('portable', defaultsTo: true)
     ..addOption('env', defaultsTo: 'pre')
     ..addFlag('dev', defaultsTo: false);
 
@@ -130,15 +131,24 @@ void main(List<String> arguments) async {
   print('Generated temp_setup.iss');
 
   // 6. Run ISCC.exe
-  final isccPath = 'C:\\Program Files (x86)\\Inno Setup 6\\ISCC.exe';
-  if (!File(isccPath).existsSync()) {
-    print('Error: Inno Setup 6 is not installed at $isccPath');
+  final localAppData = Platform.environment['LOCALAPPDATA'];
+  final compilers = [
+    path.join(
+      Platform.environment['ProgramFiles(x86)'] ?? r'C:\Program Files (x86)',
+      'Inno Setup 6',
+      'ISCC.exe',
+    ),
+    if (localAppData != null)
+      path.join(localAppData, 'Programs', 'Inno Setup 6', 'ISCC.exe'),
+  ].where((candidate) => File(candidate).existsSync());
+  if (compilers.isEmpty) {
+    print('Error: Inno Setup 6 is not installed.');
     tempIssFile.deleteSync();
     exit(1);
   }
 
   print('Running ISCC.exe...');
-  final processResult = await Process.run(isccPath, [tempIssFile.path]);
+  final processResult = await Process.run(compilers.first, [tempIssFile.path]);
   print(processResult.stdout);
   print(processResult.stderr);
 
@@ -168,6 +178,7 @@ void main(List<String> arguments) async {
   final targetInstallerPath = path.join('dist', '$outputBaseName.exe');
   generatedInstallerFile.renameSync(targetInstallerPath);
   print('Successfully generated and moved installer to: $targetInstallerPath');
+  if (args['portable'] != true) return;
 
   // 8. Generate portable ZIP archive in dist/
   final portableBaseName = isDev

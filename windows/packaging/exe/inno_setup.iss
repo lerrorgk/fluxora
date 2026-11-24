@@ -109,7 +109,7 @@ begin
     Exit;
   end;
 
-  if CompareText(ImagePath, ExpandConstant('{commonpf64}\Fluxora\Service\{{HELPER_EXECUTABLE_NAME}}')) = 0 then
+  if CompareText(ImagePath, ExpandConstant('{commonpf64}\{% if HELPER_SERVICE_NAME == 'FluxoraDevHelperService' %}FluxoraDev{% else %}Fluxora{% endif %}\Service\{{HELPER_EXECUTABLE_NAME}}')) = 0 then
     Result := HS_MANAGED
   else if Pos(Lowercase(AddBackslash(AppDir)), Lowercase(ImagePath)) = 1 then
     Result := HS_LOCAL

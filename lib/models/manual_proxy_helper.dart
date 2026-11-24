@@ -1,6 +1,7 @@
 import 'dart:convert';
 import 'dart:io';
 
+import 'package:fluxora/common/archive.dart' show profileFilesLock;
 import 'package:fluxora/common/common.dart';
 import 'package:fluxora/models/models.dart';
 import 'package:flutter/foundation.dart';
@@ -1112,13 +1113,19 @@ class ManualProxyHelper {
   static Future<Profile> addOrUpdateProxiesToProfile(
     Profile profile,
     List<Map<String, dynamic>> newProxies,
-  ) async {
-    await _rememberManual(profile, newProxies);
-    final file = await profile.getFile();
-    final content = await file.readAsString();
+  ) => profileFilesLock.synchronized(() async {
+    final file = File(await appPath.getProfilePath(profile.id));
+    final content = await file.exists() ? await file.readAsString() : '';
     final merged = await _mergeProxies(content, newProxies);
-    return profile.saveFileWithString(merged);
-  }
+    final store = await _readManualStore(profile);
+    for (final proxy in newProxies) {
+      final name = proxy['name']?.toString() ?? '';
+      if (name.isEmpty) continue;
+      store.removeWhere((item) => item['name']?.toString() == name);
+      store.add(proxy);
+    }
+    return profile.saveFileWithString(merged, manualNodes: store);
+  });
 
   static Future<String> _mergeProxies(
     String content,
@@ -1126,12 +1133,9 @@ class ManualProxyHelper {
   ) async {
     Map<String, dynamic> configMap = {};
     if (content.trim().isNotEmpty) {
-      try {
-        final loaded = loadYaml(content);
-        if (loaded is Map) {
-          configMap = deepConvertYamlMap(loaded);
-        }
-      } catch (_) {}
+      final loaded = loadYaml(content);
+      if (loaded is! Map) throw const FormatException('Invalid profile YAML');
+      configMap = deepConvertYamlMap(loaded);
     }
 
     // Ensure proxies list
@@ -1196,60 +1200,13 @@ class ManualProxyHelper {
   // 手动添加的节点以前直接写进订阅文件，而更新订阅是用下载内容**整体覆盖**
   // 那个文件，于是手动节点会静默消失。这里把它们另存一份，更新后再合并回去。
 
-  static Future<String> _manualStorePath(Profile profile) async {
-    final home = await appPath.homeDirPath;
-    return '$home/manual_proxies_${profile.id}.json';
-  }
-
   static Future<List<Map<String, dynamic>>> _readManualStore(
     Profile profile,
   ) async {
-    try {
-      final path = await _manualStorePath(profile);
-      final file = File(path);
-      if (!await file.exists()) return <Map<String, dynamic>>[];
-      final raw = jsonDecode(await file.readAsString());
-      if (raw is! List) return <Map<String, dynamic>>[];
-      return raw
-          .whereType<Map>()
-          .map((e) => Map<String, dynamic>.from(e))
-          .toList();
-    } catch (_) {
-      return <Map<String, dynamic>>[];
-    }
-  }
-
-  static Future<void> _writeManualStore(
-    Profile profile,
-    List<Map<String, dynamic>> proxies,
-  ) async {
-    try {
-      final path = await _manualStorePath(profile);
-      await File(path).writeAsString(jsonEncode(proxies));
-    } catch (_) {
-      // 存不下来不该影响主流程：节点这次已经写进配置了。
-    }
-  }
-
-  static Future<void> _rememberManual(
-    Profile profile,
-    List<Map<String, dynamic>> proxies,
-  ) async {
-    final store = await _readManualStore(profile);
-    for (final proxy in proxies) {
-      final name = proxy['name']?.toString() ?? '';
-      if (name.isEmpty) continue;
-      store.removeWhere((e) => e['name']?.toString() == name);
-      store.add(proxy);
-    }
-    await _writeManualStore(profile, store);
-  }
-
-  static Future<void> _forgetManual(Profile profile, String name) async {
-    final store = await _readManualStore(profile);
-    final before = store.length;
-    store.removeWhere((e) => e['name']?.toString() == name);
-    if (store.length != before) await _writeManualStore(profile, store);
+    final file = File(await appPath.getManualProxiesPath(profile.id));
+    if (!await file.exists()) return [];
+    final raw = jsonDecode(await file.readAsString()) as List;
+    return raw.cast<Map<String, dynamic>>().toList();
   }
 
   /// Merge into the pending download so the existing file survives a failure.
@@ -1275,12 +1232,9 @@ class ManualProxyHelper {
   static Future<({Profile profile, int removed})> deleteProxiesFromProfile(
     Profile profile,
     Set<String> proxyNames,
-  ) async {
+  ) => profileFilesLock.synchronized(() async {
     if (proxyNames.isEmpty) return (profile: profile, removed: 0);
-    for (final name in proxyNames) {
-      await _forgetManual(profile, name);
-    }
-    final file = await profile.getFile();
+    final file = File(await appPath.getProfilePath(profile.id));
     String content = await file.exists() ? await file.readAsString() : '';
     if (content.trim().isEmpty) return (profile: profile, removed: 0);
 
@@ -1301,11 +1255,17 @@ class ManualProxyHelper {
     if (removed == 0) return (profile: profile, removed: 0);
 
     final newYaml = await encodeYamlTask(configMap);
+    final store = await _readManualStore(profile);
+    final initialLength = store.length;
+    store.removeWhere((item) => proxyNames.contains(item['name']?.toString()));
     return (
-      profile: await profile.saveFileWithString(newYaml),
+      profile: await profile.saveFileWithString(
+        newYaml,
+        manualNodes: initialLength == store.length ? null : store,
+      ),
       removed: removed,
     );
-  }
+  });
 
   /// 从一份 config map 里删掉这些节点，返回**真正删掉的数量**。
   ///

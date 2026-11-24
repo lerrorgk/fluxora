@@ -1373,19 +1373,25 @@ void main() {
       await tester.pumpAndSettle();
       expect(find.byKey(const ValueKey('options-retry')), findsOneWidget);
       await capture(tester, 'custom-options-error');
-      core.configRead = Completer<Result>()
-        ..complete(
-          Result.success(<String, dynamic>{
-            'proxy-groups': [
-              {'name': '测试分组'},
-            ],
-            'rule': [],
-          }),
-        );
-      await tester.tap(find.byKey(const ValueKey('options-retry')));
-      await tester.runAsync(
-        () => Future<void>.delayed(const Duration(milliseconds: 40)),
+      await tester.runAsync(() async {
+        core.configRead = Completer<Result>()
+          ..complete(
+            Result.success(<String, dynamic>{
+              'proxy-groups': [
+                {'name': '测试分组'},
+              ],
+              'rule': [],
+            }),
+          );
+        await tester.tap(find.byKey(const ValueKey('options-retry')));
+      });
+      await tester.pump();
+      final loader = tester.widget<FutureBuilder<Widget>>(
+        find.byType(FutureBuilder<Widget>),
       );
+      await tester.runAsync(() async {
+        await loader.future!;
+      });
       await tester.pumpAndSettle();
       expect(find.text('测试分组'), findsOneWidget);
       expect(tester.takeException(), isNull);

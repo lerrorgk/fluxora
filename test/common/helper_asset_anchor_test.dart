@@ -42,7 +42,7 @@ void main() {
 
       expect(
         define,
-        contains('FluxoraHelperService.exe=${hashes[kHelperAssetNames[0]]}'),
+        contains('$kHelperExeName=${hashes[kHelperAssetNames[0]]}'),
       );
       expect(
         define,

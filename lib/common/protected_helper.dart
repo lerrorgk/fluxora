@@ -17,9 +17,13 @@ import 'dart:io';
 import 'package:crypto/crypto.dart';
 import 'package:win32_registry/win32_registry.dart';
 
+import 'identity.dart';
+
+const _helperProduct = AppIdentity.isDev ? 'FluxoraDev' : 'Fluxora';
+
 /// The helper executable. Installed into the protected directory and used as
 /// the service's `ImagePath`.
-const String kHelperExeName = 'FluxoraHelperService.exe';
+const String kHelperExeName = '${_helperProduct}HelperService.exe';
 
 /// The only DLL the helper resolves from the application directory. Everything
 /// else it imports is a System32 API set or a KnownDLL.
@@ -31,7 +35,7 @@ const String kHelperRuntimeDll = 'vcruntime140.dll';
 /// core from anywhere but its own (protected) directory — so the verified copy
 /// is what actually runs as SYSTEM. Its own import table names only
 /// `kernel32.dll`, so it brings no additional DLLs with it.
-const String kCoreExeName = 'FluxoraCore.exe';
+const String kCoreExeName = '${_helperProduct}Core.exe';
 
 /// The verified dependency closure of the LocalSystem helper **and** the core it
 /// launches.
@@ -54,7 +58,7 @@ const List<String> kHelperAssetNames = <String>[
 ];
 
 /// Default protected location. Must be under `%ProgramFiles%`.
-const String kProtectedHelperRelativeDir = r'Fluxora\Service';
+const String kProtectedHelperRelativeDir = '$_helperProduct\\Service';
 
 /// Why a deployment was refused. `none` means "safe to install".
 enum HelperInstallRejection {
@@ -768,15 +772,18 @@ final RegExp _sha256Hex = RegExp(r'^[0-9a-f]{64}$');
 /// Throws [ArgumentError] when a closure member is missing, its hash is
 /// malformed, or the map carries an asset that is not part of the closure.
 /// A partial anchor is worse than none: it would silently drop the DLL.
-String buildHelperAssetDefine(Map<String, String> hashes) {
-  if (hashes.length != kHelperAssetNames.length) {
+String buildHelperAssetDefine(
+  Map<String, String> hashes, {
+  List<String> names = kHelperAssetNames,
+}) {
+  if (hashes.length != names.length) {
     throw ArgumentError(
-      'helper asset closure mismatch: expected ${kHelperAssetNames.length} '
+      'helper asset closure mismatch: expected ${names.length} '
       'entries, got ${hashes.length}',
     );
   }
   final parts = <String>[];
-  for (final name in kHelperAssetNames) {
+  for (final name in names) {
     final hash = hashes[name]?.toLowerCase();
     if (hash == null || !_sha256Hex.hasMatch(hash)) {
       throw ArgumentError('missing or malformed sha256 for "$name"');
@@ -799,9 +806,12 @@ Future<String> sha256OfFile(String path) async {
 ///
 /// Throws [FileSystemException] when one is missing — the build must stop rather
 /// than ship a bundle whose anchor does not describe it.
-Future<Map<String, String>> hashHelperAssetsIn(String dir) async {
+Future<Map<String, String>> hashHelperAssetsIn(
+  String dir, {
+  List<String> names = kHelperAssetNames,
+}) async {
   final out = <String, String>{};
-  for (final name in kHelperAssetNames) {
+  for (final name in names) {
     out[name] = await sha256OfFile('$dir${Platform.pathSeparator}$name');
   }
   return out;
@@ -814,18 +824,19 @@ Future<Map<String, String>> hashHelperAssetsIn(String dir) async {
 Future<String?> checkHelperAssetsAgainstManifest({
   required String dir,
   required String manifestText,
+  List<String> names = kHelperAssetNames,
 }) async {
   final expected = HelperAssetManifest.parse(manifestText);
-  if (expected.isEmpty || !expected.coversExactly(kHelperAssetNames)) {
+  if (expected.isEmpty || !expected.coversExactly(names)) {
     return 'anchor is empty or incomplete';
   }
   final Map<String, String> actual;
   try {
-    actual = await hashHelperAssetsIn(dir);
+    actual = await hashHelperAssetsIn(dir, names: names);
   } on FileSystemException catch (e) {
     return '${e.message}: ${e.path}';
   }
-  for (final name in kHelperAssetNames) {
+  for (final name in names) {
     if (actual[name] != expected.hashes[name]) {
       return '$name mismatch: anchor=${expected.hashes[name]} '
           'bundle=${actual[name]}';

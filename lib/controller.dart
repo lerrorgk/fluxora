@@ -15,6 +15,7 @@ import 'package:fluxora/state.dart';
 import 'package:fluxora/views/proxies/common.dart';
 import 'package:fluxora/widgets/dialog.dart';
 import 'package:collection/collection.dart';
+import 'package:proxy/windows_proxy.dart';
 import 'package:flutter/foundation.dart';
 import 'package:flutter/material.dart';
 import 'package:flutter/services.dart';
@@ -27,7 +28,8 @@ import 'package:tray_manager/tray_manager.dart';
 import 'package:wakelock_plus/wakelock_plus.dart';
 import 'package:yaml/yaml.dart';
 
-import 'common/archive.dart' show FluxoraBackupFiles, legacyBackupAccessControl, restoreBackupFiles, routingBackupFiles;
+import 'common/archive.dart'
+    show FluxoraBackupFiles, backupAccessControl, profileFilesLock, restoreBackupFiles, routingBackupFiles;
 import 'common/common.dart';
 import 'common/external_control.dart';
 import 'common/flclash_database_extractor.dart';
@@ -378,15 +380,16 @@ class AppController {
   Future<void> _checkConnection(int generation, {bool periodic = false}) async {
     final port = effectiveMixedPort;
     if (system.isWindows && _ref.read(networkSettingProvider).systemProxy) {
-      final current = ProxyOwnership.read();
-      _ref.read(systemProxyAppliedProvider.notifier).state = current?.sameRouting(
-        ProxySnapshot(enable: 1, server: '127.0.0.1:$port'),
-      );
+      final applied = await WindowsProxyConnections.defaultUsesPort(port);
+      if (!context.mounted || generation != _connectionCheckGeneration) return;
+      if (_ref.read(networkSettingProvider).systemProxy && port == effectiveMixedPort) {
+        _ref.read(systemProxyAppliedProvider.notifier).state = applied;
+      }
     }
-    final uri = Uri.tryParse(getRealTestUrl(null));
-    if (port <= 0 || uri == null || uri.scheme != 'https' || uri.host.isEmpty) {
-      return;
-    }
+    if (port <= 0) return;
+    final configured = Uri.tryParse(getRealTestUrl(null));
+    final uri = configured != null && configured.scheme == 'https' && configured.host.isNotEmpty
+        ? configured : Uri.parse(defaultTestUrl);
     _activeCheckGeneration = generation;
     if (!periodic || _ref.read(connectionCheckProvider) == ConnectionCheck.untested) {
       _ref.read(connectionCheckProvider.notifier).state = ConnectionCheck.checking;
@@ -679,9 +682,23 @@ class AppController {
   }
 
   Future<void> deleteProfile(String id) async {
+    File? profileFile;
+    Directory? providersDir;
+    try {
+      profileFile = File(await appPath.getProfilePath(id));
+      providersDir = Directory(await appPath.getProvidersDirPath(id));
+    } on FormatException {
+      // Older releases could persist invalid IDs. Their metadata can still be
+      // removed, but no file can safely be attributed to them.
+    }
     _profileUpdates.remove(id);
     _ref.read(profilesProvider.notifier).deleteProfileById(id);
-    await clearEffect(id);
+    if (profileFile != null && providersDir != null) {
+      if (await profileFile.exists()) await profileFile.delete();
+      if (await providersDir.exists()) {
+        await providersDir.delete(recursive: true);
+      }
+    }
     if (globalState.config.currentProfileId == id) {
       final profiles = globalState.config.profiles;
       final currentProfileId = _ref.read(currentProfileIdProvider.notifier);
@@ -2779,23 +2796,6 @@ class AppController {
     };
   }
 
-  Future<void> clearEffect(String profileId) async {
-    final profilePath = await appPath.getProfilePath(profileId);
-    final providersDirPath = await appPath.getProvidersDirPath(profileId);
-    await Isolate.run(() async {
-      final profileFile = File(profilePath);
-      final isExists = await profileFile.exists();
-      if (isExists) {
-        await profileFile.delete(recursive: true);
-      }
-      final providersFileDir = Directory(providersDirPath);
-      final providersFileIsExists = await providersFileDir.exists();
-      if (providersFileIsExists) {
-        await providersFileDir.delete(recursive: true);
-      }
-    });
-  }
-
   void updateTun() {
     _ref
         .read(patchClashConfigProvider.notifier)
@@ -3168,7 +3168,9 @@ class AppController {
       'chain_fallback_pool.json': chainProxyManager.fallbackPool.toJson(),
       'warp_config.json': warpManager.config.toJson(),
     };
-    return Isolate.run(() => files.encode(home, configJson, defaultFiles));
+    return profileFilesLock.synchronized(
+      () => Isolate.run(() => files.encode(home, configJson, defaultFiles)),
+    );
   }
 
   Future<void> updateTray([
@@ -3277,19 +3279,18 @@ class AppController {
     if (configFile == null || configFile.content.isEmpty) {
       throw const FormatException('Missing backup config.json');
     }
-    final restored = Config.compatibleFromJson(
-      jsonDecode(utf8.decode(configFile.content)),
-    );
+    final rawConfig =
+        jsonDecode(utf8.decode(configFile.content)) as Map<String, dynamic>;
+    final restored = Config.compatibleFromJson(rawConfig);
     final manifest = FluxoraBackupFiles(
       restored.profiles.map((p) => p.id).toSet(),
       restored.scriptProps.scripts.map((s) => s.id).toSet(),
     );
     final all = recoveryOption == RecoveryOption.all;
     if (all) _validateRoutingBackup(archive);
-    final entries = archive.files.where(
-      (f) => manifest.includes(f.name.replaceAll('\\', '/'), all: all),
-    );
-    await restoreBackupFiles(entries, homeDirPath);
+    final control = backupAccessControl(rawConfig, restoreAll: all);
+    final selection = control == null ? null : AccessControl.fromJson(control);
+    await _restoreProfileFiles(manifest, archive, homeDirPath, all: all);
     if (all) {
       if (archive.find('chain_proxies.json') != null ||
           archive.find('chain_fallback_pool.json') != null) {
@@ -3303,7 +3304,7 @@ class AppController {
         await fixedProxyRoutes.reload();
       }
     }
-    _recovery(restored, recoveryOption);
+    _recovery(restored, recoveryOption, selection);
     await _finishRecovery();
   }
 
@@ -3457,19 +3458,14 @@ class AppController {
     }
 
     final manifest = FluxoraBackupFiles(profiles.map((p) => p.id).toSet(), {});
-    await restoreBackupFiles(
-      archive.files.where(
-        (f) => manifest.includes(f.name.replaceAll('\\', '/'), all: false),
-      ),
-      homeDirPath,
-    );
-    final control = legacyBackupAccessControl(
+    final control = backupAccessControl(
       rawConfig,
       restoreAll: recoveryOption == RecoveryOption.all,
     );
+    final selection = control == null ? null : AccessControl.fromJson(control);
+    await _restoreProfileFiles(manifest, archive, homeDirPath, all: false);
     _restoreProfiles(profiles);
-    if (system.isAndroid && control != null) {
-      final selection = AccessControl.fromJson(control);
+    if (system.isAndroid && selection != null) {
       _ref
           .read(vpnSettingProvider.notifier)
           .updateState((state) => state.copyWith(accessControl: selection));
@@ -3547,6 +3543,20 @@ class AppController {
     );
   }
 
+  Future<void> _restoreProfileFiles(
+    FluxoraBackupFiles manifest,
+    Archive archive,
+    String home, {
+    required bool all,
+  }) {
+    final overwrite =
+        _ref.read(appSettingProvider).recoveryStrategy == RecoveryStrategy.override;
+    return restoreBackupFiles(
+      manifest.entriesForRestore(archive, all: all, overwrite: overwrite),
+      home,
+    );
+  }
+
   void _restoreProfiles(List<Profile> profiles) {
     final recoveryStrategy = _ref.read(
       appSettingProvider.select((state) => state.recoveryStrategy),
@@ -3568,7 +3578,11 @@ class AppController {
   }
 
   /// Full restore
-  void _recovery(Config config, RecoveryOption recoveryOption) {
+  void _recovery(
+    Config config,
+    RecoveryOption recoveryOption,
+    AccessControl? selection,
+  ) {
     final profiles = config.profiles;
 
     // Restore subscriptions
@@ -3621,14 +3635,8 @@ class AppController {
       // 7. VPN settings
       if (system.isAndroid) {
         final currentVpnProps = _ref.read(vpnSettingProvider);
-        final hasBackupAccessControl =
-            config.vpnProps.accessControl.enable ||
-            config.vpnProps.accessControl.acceptList.isNotEmpty ||
-            config.vpnProps.accessControl.rejectList.isNotEmpty;
         _ref.read(vpnSettingProvider.notifier).value = config.vpnProps.copyWith(
-          accessControl: hasBackupAccessControl
-              ? config.vpnProps.accessControl
-              : currentVpnProps.accessControl,
+          accessControl: selection ?? currentVpnProps.accessControl,
         );
       } else if (system.isDesktop) {
         // Desktop: restore network settings, preserve TUN state

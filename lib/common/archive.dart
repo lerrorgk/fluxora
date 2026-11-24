@@ -3,6 +3,11 @@ import 'dart:io';
 
 import 'package:archive/archive_io.dart';
 import 'package:path/path.dart';
+import 'package:synchronized/synchronized.dart';
+
+import 'data_path.dart';
+
+final profileFilesLock = Lock(reentrant: true);
 
 extension ArchiveExt on Archive {
   Future<void> addDirectoryToArchive(String dirPath, String parentPath) async {
@@ -29,7 +34,7 @@ extension ArchiveExt on Archive {
   }
 }
 
-Map<String, dynamic>? legacyBackupAccessControl(
+Map<String, dynamic>? backupAccessControl(
   Map<String, dynamic> config, {
   required bool restoreAll,
 }) {
@@ -52,7 +57,11 @@ const routingBackupFiles = {
 
 /// Files owned by the selected subscriptions, and optionally the app settings.
 class FluxoraBackupFiles {
-  FluxoraBackupFiles(this.profileIds, this.scriptIds);
+  FluxoraBackupFiles(this.profileIds, this.scriptIds) {
+    for (final id in profileIds) {
+      checkedDataPathSegment(id);
+    }
+  }
 
   final Set<String> profileIds;
   final Set<String> scriptIds;
@@ -92,6 +101,27 @@ class FluxoraBackupFiles {
         parts.first == 'scripts' &&
         parts.last.endsWith('.js') &&
         scriptIds.contains(posix.basenameWithoutExtension(parts.last));
+  }
+
+  Iterable<ArchiveFile> entriesForRestore(
+    Archive archive, {
+    required bool all,
+    required bool overwrite,
+  }) sync* {
+    final missing = {
+      if (overwrite)
+        for (final id in profileIds) 'manual_proxies_$id.json',
+    };
+    for (final entry in archive.files) {
+      final name = entry.name.replaceAll('\\', '/');
+      if (!entry.isFile || !includes(name, all: all)) continue;
+      missing.remove(name);
+      yield entry;
+    }
+    // Older snapshots omit the sidecar for a profile with no manual nodes.
+    for (final name in missing) {
+      yield ArchiveFile.string(name, '[]');
+    }
   }
 
   Future<List<int>> encode(
@@ -153,35 +183,46 @@ class FluxoraBackupFiles {
 Future<void> restoreBackupFiles(
   Iterable<ArchiveFile> profiles,
   String homeDirPath,
+) => profileFilesLock.synchronized(
+  () => replaceDataFiles(
+    homeDirPath,
+    profiles.where((entry) => entry.isFile && !entry.name.endsWith('/')).map((
+      entry,
+    ) {
+      var name = entry.name.replaceAll('\\', '/');
+      if (posix.dirname(name) == 'profiles' &&
+          posix.extension(name) == '.yml') {
+        name = posix.setExtension(name, '.yaml');
+      }
+      return MapEntry(name, entry.content);
+    }),
+  ),
+);
+
+/// Stage all related files before replacing any of them, and restore the
+/// original contents if a later replacement fails.
+Future<void> replaceDataFiles(
+  String homeDirPath,
+  Iterable<MapEntry<String, List<int>>> files,
 ) async {
-  final canonicalHome = canonicalize(homeDirPath);
   final homeDirectory = await Directory(homeDirPath).create(recursive: true);
-  final home = await homeDirectory.resolveSymbolicLinks();
   final staging = await homeDirectory.createTemp('.fluxora-restore-');
   final pending = <({File target, File next, File? previous})>[];
   final targets = <String>{};
   var installed = 0;
   var keepRecoveryFiles = false;
   try {
-    for (final profile in profiles) {
-      final name = profile.name.replaceAll('\\', '/');
-      if (!profile.isFile || name.endsWith('/')) continue;
-      final path = canonicalize(join(homeDirPath, name));
-      if (!isWithin(canonicalHome, path)) continue;
-      if (!targets.add(path)) {
+    for (final file in files) {
+      final name = file.key;
+      final path = await checkedDataPath(homeDirPath, name.split('/'));
+      if (!targets.add(canonicalize(path))) {
         throw FormatException('Duplicate backup file: $name');
       }
       final target = File(path);
-      var ancestor = target.parent;
-      while (!await ancestor.exists()) {
-        ancestor = ancestor.parent;
-      }
-      final parent = await ancestor.resolveSymbolicLinks();
-      if (!equals(parent, home) && !isWithin(home, parent)) continue;
       await target.parent.create(recursive: true);
       final index = pending.length;
       final next = File(join(staging.path, '$index.next'));
-      await next.writeAsBytes(profile.content, flush: true);
+      await next.writeAsBytes(file.value, flush: true);
       final previous = await target.exists()
           ? await target.copy(join(staging.path, '$index.previous'))
           : null;

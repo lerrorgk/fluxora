@@ -6,6 +6,7 @@ import 'package:fluxora/common/common.dart';
 import 'package:flutter/foundation.dart' show visibleForTesting;
 import 'package:win32_registry/win32_registry.dart';
 import 'package:proxy/unix_system_proxy.dart';
+import 'package:proxy/windows_proxy.dart';
 import 'package:synchronized/synchronized.dart';
 
 /// The WinINET values that decide where traffic actually goes.
@@ -64,6 +65,7 @@ class ProxyOwnershipState {
     this.snapshot,
     this.applied,
     this.intended,
+    this.connections,
     this.pid = 0,
   });
 
@@ -94,9 +96,12 @@ class ProxyOwnershipState {
   final ProxySnapshot? intended;
 
   final int pid;
+  final Map<String, WindowsProxyClaim>? connections;
 
   Map<String, Object?> toJson() => {
-    'schema': 2,
+    'schema': connections == null ? 2 : 3,
+    if (connections != null)
+      'connections': connections!.map((name, claim) => MapEntry(name, claim.encode())),
     'owned': owned,
     'pending': pending,
     'pid': pid,
@@ -116,6 +121,9 @@ class ProxyOwnershipState {
       // Absent in schema 1 records; a pending record without it stays
       // unresolvable on purpose (see reconcileOnStart).
       intended: ProxySnapshot.fromJson(raw['intended']),
+      connections: (raw['connections'] as Map?)?.map(
+        (name, claim) => MapEntry(name as String, WindowsProxyClaim.decode(claim)),
+      ),
     );
   }
 }
@@ -353,12 +361,12 @@ class ProxyOwnership {
     }
   }
 
-  static Future<bool?> _start(int port, List<String> bypass, {bool own = false}) {
+  static Future<bool?> _start(int port, List<String> bypass) {
     final override = startForTest;
     if (override != null) return override(port, bypass);
     final plugin = proxy;
     if (plugin == null) return Future<bool?>.value(null);
-    return own ? plugin.startOwnedWindowsProxy(port, bypass) : plugin.startProxy(port, bypass);
+    return plugin.startDefaultWindowsProxy(port, bypass);
   }
 
   static Future<bool?> _stop() {
@@ -366,7 +374,7 @@ class ProxyOwnership {
     if (override != null) return override();
     final plugin = proxy;
     if (plugin == null) return Future<bool?>.value(null);
-    return plugin.stopProxy();
+    return plugin.stopDefaultWindowsProxy();
   }
 
   /// Writes a recorded snapshot back verbatim, then announces it to WinINET.
@@ -536,12 +544,22 @@ class ProxyOwnership {
     // P10-P0-B — no unprotected write. If the pending record cannot be
     // persisted, a crash would leave the system proxy pointing at us with no
     // note of what it used to be.
+    Map<String, WindowsProxyClaim>? connections;
+    if (Platform.isWindows && startForTest == null) {
+      // A legacy journal has enough information to recover only the default
+      // connection. Finish that recovery before taking a new RAS snapshot.
+      if (existing.owned && existing.connections == null) return false;
+      connections = await WindowsProxyConnections.prepare(
+        port, intended.bypass, existing.connections, allowRetakeover: allowRetakeover,
+      );
+    }
     final pendingSaved = await _save(
       ProxyOwnershipState(
         pending: true,
         snapshot: snapshotForRecord,
         applied: previousApplied,
         intended: intended,
+        connections: connections,
         pid: pid,
       ),
     );
@@ -553,20 +571,33 @@ class ProxyOwnership {
       return false;
     }
 
+    Future<void> undo() async {
+      if (connections != null) {
+        if (await WindowsProxyConnections.restore(connections,
+            pending: true, rollback: true, existing: existing.connections)) {
+          if (existing.owned) {
+            await _save(existing);
+          } else {
+            await _clear();
+          }
+        }
+        return;
+      }
+      await _rollback(before, intended: intended, snapshotForRecord: snapshotForRecord,
+          previousApplied: previousApplied);
+    }
+
     bool? ok;
     try {
-      ok = await _start(port, cleanBypass, own: true);
+      ok = connections == null
+          ? await _start(port, cleanBypass)
+          : await WindowsProxyConnections.apply(connections);
     } catch (e) {
       commonPrint.log('ProxyOwnership: startProxy threw: $e');
       ok = false;
     }
     if (ok != true) {
-      await _rollback(
-        before,
-        intended: intended,
-        snapshotForRecord: snapshotForRecord,
-        previousApplied: previousApplied,
-      );
+      await undo();
       return false;
     }
 
@@ -578,12 +609,7 @@ class ProxyOwnership {
         'ProxyOwnership: write did not land (read back ${applied?.enable}/'
         '${applied?.server}), rolling back',
       );
-      await _rollback(
-        before,
-        intended: intended,
-        snapshotForRecord: snapshotForRecord,
-        previousApplied: previousApplied,
-      );
+      await undo();
       return false;
     }
 
@@ -592,6 +618,7 @@ class ProxyOwnership {
         owned: true,
         snapshot: snapshotForRecord,
         applied: applied,
+        connections: connections,
         pid: pid,
       ),
     );
@@ -601,12 +628,7 @@ class ProxyOwnership {
       commonPrint.log(
         'ProxyOwnership: cannot persist the ownership record; rolling back',
       );
-      await _rollback(
-        before,
-        intended: intended,
-        snapshotForRecord: snapshotForRecord,
-        previousApplied: previousApplied,
-      );
+      await undo();
       return false;
     }
     return true;
@@ -713,6 +735,7 @@ class ProxyOwnership {
       return await unix.release() ? ProxyReleaseOutcome.restored : ProxyReleaseOutcome.restoreFailed;
     }
     final state = await load();
+    if (state.connections != null) return _releaseWindowsConnections(state);
     if (!state.owned) return ProxyReleaseOutcome.notOwned;
 
     final current = read();
@@ -734,18 +757,6 @@ class ProxyOwnership {
       return ProxyReleaseOutcome.ownershipUnknown;
     }
 
-    if (Platform.isWindows && readForTest == null) {
-      // The native session snapshot includes PAC flags and individual RAS
-      // connections. It also guards the synchronous Windows logoff callback.
-      final restored = await proxy?.releaseWindowsSessionProxy();
-      if (restored == false) return ProxyReleaseOutcome.restoreFailed;
-      if (restored == true) {
-        await _clear();
-        return current.sameRouting(applied)
-            ? ProxyReleaseOutcome.restored
-            : ProxyReleaseOutcome.externalChange;
-      }
-    }
     if (!current.sameRouting(applied)) {
       // Clash Verge (or anything else) changed it while we held it. Their
       // value wins — we drop our claim and touch nothing.
@@ -811,6 +822,7 @@ class ProxyOwnership {
       }
     }
     final state = await load();
+    if (state.connections != null) return _releaseWindowsConnections(state);
     if (!state.owned && !state.pending) return ProxyReleaseOutcome.notOwned;
 
     final current = read();
@@ -977,6 +989,20 @@ class ProxyOwnership {
     return restore == ProxyRestoreOutcome.writtenPartial
         ? ProxyReleaseOutcome.restoredPartial
         : ProxyReleaseOutcome.restored;
+  }
+
+  static Future<ProxyReleaseOutcome> _releaseWindowsConnections(ProxyOwnershipState state) async {
+    try {
+      final restored = await WindowsProxyConnections.restore(state.connections!, pending: state.pending);
+      if (!restored) return ProxyReleaseOutcome.restoreFailed;
+      final current = read();
+      await _clear();
+      return current != null && state.snapshot != null && !current.sameRouting(state.snapshot!)
+          ? ProxyReleaseOutcome.externalChange : ProxyReleaseOutcome.restored;
+    } catch (error) {
+      commonPrint.log('Could not restore WinINET connections: $error');
+      return ProxyReleaseOutcome.restoreFailed;
+    }
   }
 
   /// Restores [snapshot] as faithfully as the available primitives allow.

@@ -112,6 +112,31 @@ void main() {
   Future<void> pumpNodes(WidgetTester tester, List<String> names) =>
       pumpTypedNodes(tester, [for (final name in names) (name, 'vless')]);
 
+  testWidgets('invalid custom YAML keeps the node editor and its input open', (
+    tester,
+  ) async {
+    await pumpNodes(tester, []);
+    await tester.tap(find.byType(FloatingActionButton));
+    await tester.pumpAndSettle();
+    final picker = tester.widget<DropdownButton<ManualProtocol>>(
+      find.byType(DropdownButton<ManualProtocol>),
+    );
+    picker.onChanged!(ManualProtocol.custom);
+    await tester.pumpAndSettle();
+
+    final field = find.byWidgetPredicate(
+      (w) => w is TextField && w.decoration?.labelText == appLocalizations.customConfigLabel,
+    );
+    for (final input in ['name: [', '- a list', 'name: incomplete']) {
+      await tester.enterText(field, input);
+      await tester.tap(find.text(appLocalizations.saveNode));
+      await tester.pumpAndSettle();
+      final editor = tester.widget<TextField>(field);
+      expect(editor.controller!.text, input);
+      expect(editor.decoration!.errorText, isNotEmpty);
+    }
+  });
+
   /// Opens the overflow menu and taps the sort entry labelled [label].
   Future<void> chooseSort(WidgetTester tester, String label) async {
     await tester.tap(find.byTooltip(appLocalizations.more));

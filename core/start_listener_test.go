@@ -1,6 +1,7 @@
 package main
 
 import (
+	"context"
 	"net"
 	"net/http"
 	"net/http/httptest"
@@ -14,9 +15,11 @@ import (
 	"github.com/metacubex/mihomo/adapter/outbound"
 	"github.com/metacubex/mihomo/config"
 	"github.com/metacubex/mihomo/constant"
+	"github.com/metacubex/mihomo/dns"
 	"github.com/metacubex/mihomo/listener"
 	LC "github.com/metacubex/mihomo/listener/config"
 	"github.com/metacubex/mihomo/tunnel"
+	D "github.com/miekg/dns"
 )
 
 func TestStartListenerRejectsUnconfiguredAndOccupiedPort(t *testing.T) {
@@ -166,4 +169,81 @@ func TestForwardedPortFollowsListenerLifecycle(t *testing.T) {
 	expectAvailable(false)
 	handleStopListener()
 	expectAvailable(true)
+}
+
+type localDNSReply int
+
+func (rcode localDNSReply) ServeMsg(_ context.Context, q *D.Msg) (*D.Msg, error) {
+	return new(D.Msg).SetRcode(q, int(rcode)), nil
+}
+
+func TestDNSPortFollowsListenerLifecycle(t *testing.T) {
+	previous, running := currentConfig, isRunning
+	t.Cleanup(func() {
+		handleStopListener()
+		dns.ReCreateServer("", nil, nil)
+		currentConfig, isRunning = previous, running
+	})
+	currentConfig = &config.Config{General: &config.General{}}
+	blocker, err := net.Listen("tcp4", "127.0.0.1:0")
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer blocker.Close()
+	addr := blocker.Addr().String()
+	checkUDPFree := func() {
+		t.Helper()
+		p, err := net.ListenPacket("udp4", addr)
+		if err != nil {
+			t.Fatal("DNS UDP port still held:", err)
+		}
+		p.Close()
+	}
+	checkReplies := func(want int, networks ...string) {
+		t.Helper()
+		q := new(D.Msg).SetQuestion("fluxora.test.", D.TypeA)
+		for _, network := range networks {
+			client := D.Client{Net: network, Timeout: time.Second}
+			got, _, err := client.Exchange(q, addr)
+			if err != nil || got.Rcode != want {
+				t.Fatalf("%s DNS query: got %v, err %v", network, got, err)
+			}
+		}
+	}
+
+	lc := inbound.NewListenConfig()
+	dns.ReCreateServer(addr, lc, localDNSReply(D.RcodeSuccess))
+	checkUDPFree()
+	currentConfig.General.MixedPort = blocker.Addr().(*net.TCPAddr).Port
+	if handleStartListener() {
+		t.Fatal("occupied mixed port unexpectedly started")
+	}
+	checkUDPFree()
+	currentConfig.General.MixedPort = 0
+	if !handleStartListener() {
+		t.Fatal("occupied DNS TCP port prevented the proxy from starting")
+	}
+	checkReplies(D.RcodeSuccess, "udp")
+	handleStopListener()
+	checkUDPFree()
+	blocker.Close()
+	if !handleStartListener() {
+		t.Fatal("could not retry the configured DNS port")
+	}
+	checkReplies(D.RcodeSuccess, "udp", "tcp")
+	dns.ReCreateServer(addr, lc, localDNSReply(D.RcodeNameError))
+	checkReplies(D.RcodeNameError, "udp", "tcp")
+
+	handleStopListener()
+	dns.ReCreateServer(addr, lc, localDNSReply(D.RcodeRefused))
+	checkUDPFree()
+	tcp, err := net.Listen("tcp4", addr)
+	if err != nil {
+		t.Fatal("DNS TCP port still held:", err)
+	}
+	tcp.Close()
+	if !handleStartListener() {
+		t.Fatal("could not reopen DNS after a stopped config reload")
+	}
+	checkReplies(D.RcodeRefused, "udp", "tcp")
 }

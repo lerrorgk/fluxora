@@ -23,7 +23,7 @@ class AppIdentity {
   ///
   /// | platform | switch | source of truth |
   /// | --- | --- | --- |
-  /// | Windows | build configuration | `windows/CMakeLists.txt` → `CONFIGURATIONS Debug` |
+  /// | Windows | Debug configuration or `APP_DEV` | `windows/CMakeLists.txt` → `CORE_VARIANT` |
   /// | macOS | build configuration | `macos/Runner.xcodeproj` → `FLUXORA_CORE_EXECUTABLE` |
   /// | Linux | `APP_DEV` | `linux/CMakeLists.txt` → `_app_dev_found` |
   ///

@@ -34,6 +34,31 @@ std::wstring wide(const std::string& value) {
   return result;
 }
 
+std::string utf8(const std::wstring& value) {
+  if (value.empty()) return {};
+  int count = WideCharToMultiByte(CP_UTF8, 0, value.data(), static_cast<int>(value.size()),
+                                  nullptr, 0, nullptr, nullptr);
+  std::string result(count, '\0');
+  if (count) WideCharToMultiByte(CP_UTF8, 0, value.data(), static_cast<int>(value.size()),
+                                 &result[0], count, nullptr, nullptr);
+  return result;
+}
+
+using flutter::EncodableList;
+using flutter::EncodableMap;
+using flutter::EncodableValue;
+
+EncodableValue encodeSettings(const Settings& s) {
+  return EncodableValue(EncodableList{EncodableValue(static_cast<int>(s.flags)),
+      EncodableValue(utf8(s.server)), EncodableValue(utf8(s.bypass)), EncodableValue(utf8(s.pac))});
+}
+
+Settings decodeSettings(const EncodableValue& encoded) {
+  const auto& list = std::get<EncodableList>(encoded);
+  return {static_cast<DWORD>(std::get<int>(list.at(0))), wide(std::get<std::string>(list.at(1))),
+          wide(std::get<std::string>(list.at(2))), wide(std::get<std::string>(list.at(3)))};
+}
+
 bool connections(std::vector<std::wstring>& names) {
   names.emplace_back();  // Default LAN connection.
   RASENTRYNAMEW first{};
@@ -65,7 +90,9 @@ INTERNET_PER_CONN_OPTION_LISTW options(const std::wstring& name,
 
 bool readSettings(const std::wstring& name, Settings& settings) {
   INTERNET_PER_CONN_OPTIONW values[4]{};
-  values[0].dwOption = INTERNET_PER_CONN_FLAGS;
+  // Read the user's configured flags, including automatic detection, even
+  // when WinINET's current effective detection state differs.
+  values[0].dwOption = INTERNET_PER_CONN_FLAGS_UI;
   values[1].dwOption = INTERNET_PER_CONN_PROXY_SERVER;
   values[2].dwOption = INTERNET_PER_CONN_PROXY_BYPASS;
   values[3].dwOption = INTERNET_PER_CONN_AUTOCONFIG_URL;
@@ -106,6 +133,25 @@ bool sameRoute(const Settings& left, const Settings& right) {
   return left.flags == right.flags && left.server == right.server && left.pac == right.pac;
 }
 
+// Every operation is conditional on the settings the caller journaled.
+// Keep an in-process copy for the synchronous WM_ENDSESSION callback.
+bool writeConnection(const EncodableMap& arguments) {
+  const auto name = wide(std::get<std::string>(arguments.at(EncodableValue("name"))));
+  const auto expected = decodeSettings(arguments.at(EncodableValue("expected")));
+  const auto value = decodeSettings(arguments.at(EncodableValue("value")));
+  Settings current;
+  if (!readSettings(name, current) || !sameRoute(current, expected) ||
+      current.bypass != expected.bypass) return false;
+  if (!sameRoute(value, current) || value.bypass != current.bypass) {
+    if (!writeSettings(name, value, 4)) return false;
+    refresh();
+  }
+  auto original = arguments.find(EncodableValue("original"));
+  if (original != arguments.end()) claims[name] = {decodeSettings(original->second), value};
+  else claims.erase(name);
+  return readSettings(name, current) && sameRoute(current, value) && current.bypass == value.bypass;
+}
+
 bool restoreClaims(std::map<std::wstring, Claim>& records) {
   bool changed = false;
   for (auto it = records.begin(); it != records.end();) {
@@ -124,7 +170,7 @@ bool restoreClaims(std::map<std::wstring, Claim>& records) {
   return records.empty();
 }
 
-bool startProxy(int port, const flutter::EncodableList& bypass, bool own) {
+bool startProxy(int port, const flutter::EncodableList& bypass, bool defaultOnly) {
   Settings target;
   target.flags = PROXY_TYPE_DIRECT | PROXY_TYPE_PROXY;
   target.server = L"127.0.0.1:" + std::to_wstring(port);
@@ -134,23 +180,21 @@ bool startProxy(int port, const flutter::EncodableList& bypass, bool own) {
   }
 
   std::vector<std::wstring> names;
-  if (!connections(names)) return false;
+  if (defaultOnly) names.emplace_back();
+  else if (!connections(names)) return false;
   std::map<std::wstring, Settings> beforeWrite;
   for (const auto& name : names) {
     Settings current;
     if (!readSettings(name, current)) return false;
-    auto saved = claims.find(name);
-    if (own && saved != claims.end() && !sameRoute(current, saved->second.applied)) continue;
     beforeWrite.emplace(name, current);
   }
 
-  const auto oldClaims = claims;
   std::map<std::wstring, Claim> writes;
   for (const auto& item : beforeWrite) {
     const auto& name = item.first;
     const auto& previous = item.second;
     if (!writeSettings(name, target, 3)) {
-      if (restoreClaims(writes)) claims = oldClaims;
+      restoreClaims(writes);
       return false;
     }
     auto applied = target;
@@ -159,11 +203,6 @@ bool startProxy(int port, const flutter::EncodableList& bypass, bool own) {
     if (readSettings(name, observed) && observed.server == target.server &&
         (observed.flags & PROXY_TYPE_PROXY)) applied = observed;
     writes.emplace(name, Claim{previous, applied});
-    if (own) {
-      auto saved = claims.find(name);
-      const auto& original = saved == claims.end() ? previous : saved->second.before;
-      claims[name] = {original, applied};
-    }
   }
   refresh();
   return true;
@@ -233,7 +272,32 @@ namespace proxy
       const flutter::MethodCall<flutter::EncodableValue> &method_call,
       std::unique_ptr<flutter::MethodResult<flutter::EncodableValue>> result)
   {
-    if (method_call.method_name().compare("StopProxy") == 0)
+    if (method_call.method_name() == "ReadWindowsProxies") {
+      std::vector<std::wstring> names;
+      EncodableMap snapshots;
+      const auto* defaultOnly = method_call.arguments() ? std::get_if<bool>(method_call.arguments()) : nullptr;
+      if (defaultOnly && *defaultOnly) names.emplace_back();
+      else if (!connections(names)) { result->Error("read", "Cannot enumerate RAS connections"); return; }
+      for (const auto& name : names) {
+        Settings current;
+        if (!readSettings(name, current)) { result->Error("read", "Cannot read WinINET settings"); return; }
+        snapshots.emplace(EncodableValue(utf8(name)), encodeSettings(current));
+      }
+      result->Success(EncodableValue(snapshots));
+    }
+    else if (method_call.method_name() == "WriteWindowsProxy") {
+      result->Success(writeConnection(std::get<EncodableMap>(*method_call.arguments())));
+    }
+    else if (method_call.method_name() == "ForgetWindowsProxyClaims") {
+      claims.clear();
+      result->Success();
+    }
+    else if (method_call.method_name() == "StopDefaultWindowsProxy") {
+      const bool ok = writeSettings(L"", Settings{}, 1);
+      if (ok) refresh();
+      result->Success(ok);
+    }
+    else if (method_call.method_name().compare("StopProxy") == 0)
     {
       result->Success(stopProxy());
     }
@@ -242,12 +306,8 @@ namespace proxy
       auto *arguments = std::get_if<flutter::EncodableMap>(method_call.arguments());
       auto port = std::get<int>(arguments->at(flutter::EncodableValue("port")));
       auto bypassDomain = std::get<flutter::EncodableList>(arguments->at(flutter::EncodableValue("bypassDomain")));
-      const bool own = arguments->count(flutter::EncodableValue("own")) != 0;
-      result->Success(startProxy(port, bypassDomain, own));
-    }
-    else if (method_call.method_name() == "ReleaseSessionProxy") {
-      if (claims.empty()) result->Success();
-      else result->Success(restoreClaims(claims));
+      const bool defaultOnly = arguments->count(flutter::EncodableValue("defaultOnly")) != 0;
+      result->Success(startProxy(port, bypassDomain, defaultOnly));
     }
     else
     {

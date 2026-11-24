@@ -10,7 +10,9 @@ import 'package:fluxora/common/protected_helper.dart';
 /// and nothing that needs a Windows host.
 void main() {
   const programFiles = r'C:\Program Files';
-  const protectedCore = r'C:\Program Files\Fluxora\Service\FluxoraCore.exe';
+  const protectedCore = AppIdentity.isDev
+      ? r'C:\Program Files\FluxoraDev\Service\FluxoraDevCore.exe'
+      : r'C:\Program Files\Fluxora\Service\FluxoraCore.exe';
   const bundleCore =
       r'D:\MyASUS\Documents\ChatGPT\box\fluxora-rc6-branch\build\windows\x64\runner\Release\FluxoraCore.exe';
 
@@ -145,8 +147,11 @@ void main() {
 
   // ------------------------------------------------------- identity isolation
   group('identity isolation', () {
-    test('the deployed helper name is the release identity name', () {
-      expect(specFor(HelperIdentityKind.release).helperExeName, kHelperExeName);
+    test('the deployed helper name matches the packaged identity', () {
+      final kind = AppIdentity.isDev
+          ? HelperIdentityKind.dev
+          : HelperIdentityKind.release;
+      expect(kHelperExeName, specFor(kind).helperExeName);
     });
 
     test('the three identities never share a service or a file name', () {

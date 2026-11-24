@@ -17,6 +17,7 @@ import (
 	"github.com/metacubex/mihomo/constant"
 	"github.com/metacubex/mihomo/constant/features"
 	cp "github.com/metacubex/mihomo/constant/provider"
+	"github.com/metacubex/mihomo/dns"
 	"github.com/metacubex/mihomo/hub"
 	"github.com/metacubex/mihomo/listener"
 	"github.com/metacubex/mihomo/log"
@@ -154,11 +155,8 @@ func updateListeners() error {
 	if !features.Android && general.Tun.Enable && !listener.GetTunConf().Enable {
 		listenerErrors = append(listenerErrors, errors.New("TUN listener did not start"))
 	}
-	for name, err := range inboundFailures {
-		if strings.HasPrefix(name, "fluxora-fixed-") {
-			listenerErrors = append(listenerErrors, fmt.Errorf("%s: %w", name, err))
-		}
-	}
+	// Optional fixed ports report their bind errors individually through
+	// fixedListenerStatus. Their failure does not invalidate the main route.
 	return errors.Join(listenerErrors...)
 }
 
@@ -186,6 +184,10 @@ func fixedListenerStatus() map[string]string {
 }
 
 func stopListeners() {
+	isRunning = false
+	if !features.Android {
+		dns.SetServerEnabled(false)
+	}
 	listener.StopListener()
 }
 

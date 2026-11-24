@@ -2,6 +2,7 @@
 
 import 'dart:convert';
 import 'dart:io';
+import 'dart:isolate';
 
 import 'package:args/command_runner.dart';
 import 'package:crypto/crypto.dart';
@@ -258,7 +259,7 @@ class Build {
     return corePaths;
   }
 
-  static Future<void> buildHelper(Target target, String token) async {
+  static Future<String> buildHelper(Target target, String token) async {
     await exec(
       ['cargo', 'build', '--release', '--features', 'windows-service'],
       environment: {'TOKEN': token},
@@ -277,6 +278,7 @@ class Build {
       '${Build.helperName}${target.executableExtensionName}',
     );
     await File(outPath).copy(targetPath);
+    return targetPath;
   }
 
   static List<String> getExecutable(String command) {
@@ -465,6 +467,24 @@ class BuildCommand extends Command {
     );
   }
 
+  Map<String, String> _appDefines(String env, String suffix) {
+    final sentryDsn = Platform.environment['SENTRY_DSN'] ?? '';
+    final ipinfoToken = Platform.environment['IPINFO_TOKEN'] ?? '';
+
+    final appVersion =
+        Platform.environment['APP_BUILD_NAME'] ??
+        Platform.environment['APP_VERSION'] ??
+        '';
+    return {
+      'APP_ENV': env,
+      if (suffix.isNotEmpty) 'APP_ASSET_SUFFIX': suffix,
+      if (Build.isDev) 'APP_DEV': 'true',
+      if (appVersion.isNotEmpty) 'APP_VERSION': appVersion,
+      if (sentryDsn.isNotEmpty) 'SENTRY_DSN': sentryDsn,
+      if (ipinfoToken.isNotEmpty) 'IPINFO_TOKEN': ipinfoToken,
+    };
+  }
+
   Future<void> _buildDistributor({
     required Target target,
     required String targets,
@@ -473,42 +493,19 @@ class BuildCommand extends Command {
     required String suffix,
     bool compatible = false,
   }) async {
-    final sentryDsn = Platform.environment['SENTRY_DSN'] ?? '';
-    final sentryArg = sentryDsn.isNotEmpty
-        ? ' --build-dart-define=SENTRY_DSN=$sentryDsn'
-        : '';
-    final suffixArg = suffix.isNotEmpty
-        ? ' --build-dart-define=APP_ASSET_SUFFIX=$suffix'
-        : '';
-
-    final ipinfoToken = Platform.environment['IPINFO_TOKEN'] ?? '';
-    final ipinfoArg = ipinfoToken.isNotEmpty
-        ? ' --build-dart-define=IPINFO_TOKEN=$ipinfoToken'
-        : '';
-
-    final appDevArg = Build.isDev ? ' --build-dart-define=APP_DEV=true' : '';
-
-    final appVersion =
-        Platform.environment['APP_BUILD_NAME'] ??
-        Platform.environment['APP_VERSION'] ??
-        '';
-    final appVersionArg = appVersion.isNotEmpty
-        ? ' --build-dart-define=APP_VERSION=$appVersion'
-        : '';
-
     final environment = Map<String, String>.from(Platform.environment);
     if (compatible) {
       environment['FLUXORA_COMPATIBLE_BUILD'] = '1';
     }
 
     await Build.getDistributor();
-    await Build.exec(
-      name: name,
-      Build.getExecutable(
-        'flutter_distributor package --skip-clean --platform ${target.name} --targets $targets --flutter-build-args=verbose$args$sentryArg$suffixArg$ipinfoArg$appVersionArg --build-dart-define=APP_ENV=$env$appDevArg$appVersionArg',
+    await Build.exec([
+      ...Build.getExecutable(
+        'flutter_distributor package --skip-clean --platform ${target.name} --targets $targets --flutter-build-args=verbose$args',
       ),
-      environment: environment,
-    );
+      for (final entry in _appDefines(env, suffix).entries)
+        '--build-dart-define=${entry.key}=${entry.value}',
+    ], name: name, environment: environment);
   }
 
   Future<String?> get systemArch async {
@@ -722,17 +719,69 @@ class BuildCommand extends Command {
 
     switch (target) {
       case Target.windows:
-        final token = target != Target.android
-            ? await Build.calcSha256(corePaths.first)
-            : null;
-        Build.buildHelper(target, token!);
-        _buildDistributor(
-          target: target,
-          targets: 'exe',
-          args: ' --description $desc --build-dart-define=CORE_SHA256=$token',
-          env: env,
-          suffix: appAssetSuffix,
-          compatible: compatible,
+        final token = await Build.calcSha256(corePaths.first);
+        final helper = await Build.buildHelper(target, token);
+        final vclibs = await Isolate.resolvePackageUri(
+          Uri.parse('package:vclibs/vclibs.dart'),
+        );
+        if (vclibs == null) {
+          throw StateError('Could not resolve the vclibs package');
+        }
+        final runtimeArch = arch == Arch.arm64 ? 'arm64' : 'x64';
+        final runtime = vclibs.resolve(
+          '../windows/VCLibs/$runtimeArch/$kHelperRuntimeDll',
+        );
+        final helperName = '${Build.helperName}.exe';
+        final coreName = '${Build.coreName}.exe';
+        final anchor = await helperAssetAnchor(
+          helper,
+          runtime.toFilePath(),
+          token,
+          helperName: helperName,
+          coreName: coreName,
+        );
+        final defines = {
+          ..._appDefines(env, appAssetSuffix),
+          'CORE_SHA256': token,
+          'HELPER_ASSET_SHA256': anchor,
+        };
+        final temp = await Directory('.dart_tool').createTemp('windows-defines-');
+        try {
+          final file = File(join(temp.path, 'build.json'));
+          await file.writeAsString(jsonEncode(defines));
+          await Build.exec(
+            [
+              'flutter', 'build', 'windows', '--release',
+              if (defines.containsKey('APP_VERSION'))
+                '--build-name=${defines['APP_VERSION']}',
+              '--dart-define-from-file=${relative(file.path)}',
+            ],
+            name: 'build Windows application',
+            environment: {if (compatible) 'FLUXORA_COMPATIBLE_BUILD': '1'},
+          );
+        } finally {
+          await temp.delete(recursive: true);
+        }
+        final bundle = join('build', 'windows', runtimeArch, 'runner', 'Release');
+        final problem = await checkHelperAssetsAgainstManifest(
+          dir: bundle,
+          manifestText: anchor,
+          names: [helperName, kHelperRuntimeDll, coreName],
+        );
+        if (problem != null) {
+          throw StateError('Windows helper assets: $problem');
+        }
+        await Build.exec(
+          [
+            Platform.resolvedExecutable,
+            'windows/packaging/exe/package_windows.dart',
+            '--arch', arch!.name,
+            if (compatible) '--compatible',
+            if (dev) '--dev',
+            '--no-portable',
+          ],
+          name: 'package Windows installer',
+          runInShell: false,
         );
         return;
       case Target.linux:
@@ -1036,20 +1085,33 @@ class HelperManifestCommand extends Command<void> {
     }
 
     try {
-      final hashes = <String, String>{
-        kHelperExeName: await sha256OfFile(helper),
-        kHelperRuntimeDll: await sha256OfFile(vcruntime),
-        kCoreExeName: await sha256OfFile(core),
-      };
+      final anchor = await helperAssetAnchor(
+        helper,
+        vcruntime,
+        await sha256OfFile(core),
+      );
       // Prefixed so the caller can pick it out of the tool's other output
       // (`dart run` prints "Running build hooks..." on the same stream).
-      print('HELPER_ASSET_SHA256=${buildHelperAssetDefine(hashes)}');
+      print('HELPER_ASSET_SHA256=$anchor');
     } on Object catch (e) {
       print('helper-manifest: $e');
       exitCode = 1;
     }
   }
 }
+
+Future<String> helperAssetAnchor(
+  String helper,
+  String runtime,
+  String coreHash, {
+  String helperName = kHelperExeName,
+  String coreName = kCoreExeName,
+}) async =>
+    buildHelperAssetDefine({
+      helperName: await sha256OfFile(helper),
+      kHelperRuntimeDll: await sha256OfFile(runtime),
+      coreName: coreHash,
+    }, names: [helperName, kHelperRuntimeDll, coreName]);
 
 Future<void> main(Iterable<String> args) async {
   final runner = CommandRunner('setup', 'build Application');

@@ -275,18 +275,30 @@ rules: ['MATCH,Select']
     ref.read(networkSettingProvider.notifier).updateState((v) => v.copyWith(systemProxy: true));
     ref.read(runTimeProvider.notifier).value = 0;
     final expected = '127.0.0.1:${controller.effectiveMixedPort}';
-    addTearDown(() => ProxyOwnership.readForTest = null);
-    for (final (snapshot, applied) in <(ProxySnapshot?, bool?)>[
-      (ProxySnapshot(enable: 1, server: expected), true),
-      (const ProxySnapshot(), false),
-      (const ProxySnapshot(enable: 1, server: 'other'), false),
-      (ProxySnapshot(enable: 1, server: expected, autoConfigUrl: 'test.pac'), false),
+    const channel = MethodChannel('proxy');
+    final messenger = tester.binding.defaultBinaryMessenger;
+    addTearDown(() => messenger.setMockMethodCallHandler(channel, null));
+    for (final (snapshot, applied) in <(List<Object>?, bool?)>[
+      ([3, expected, '', ''], true),
+      ([1, '', '', ''], false),
+      ([3, 'other', '', ''], false),
+      ([3, expected, '', 'test.pac'], true),
+      ([7, expected, '', 'test.pac'], false),
+      ([11, expected, '', ''], false),
       (null, null),
-      (ProxySnapshot(enable: 1, server: expected), true),
+      ([3, expected, '', ''], true),
     ]) {
-      ProxyOwnership.readForTest = () => snapshot;
+      messenger.setMockMethodCallHandler(channel, (call) async {
+        expect(call.method, 'ReadWindowsProxies');
+        expect(call.arguments, true);
+        if (snapshot == null) throw PlatformException(code: 'unavailable');
+        return {'': snapshot};
+      });
       await controller.recheckRunningConnection();
       expect(ref.read(systemProxyAppliedProvider), applied);
+      // The binding returns HTTP 400 for network requests. A custom HTTP
+      // latency URL must still produce a completed connection health check.
+      expect(ref.read(connectionCheckProvider), ConnectionCheck.limited);
     }
   });
 

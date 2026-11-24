@@ -1500,9 +1500,13 @@ class GlobalState {
     if (proxies.isEmpty) {
       throw StateError('aggregate member has no usable proxies');
     }
-    final directoryPath = await appPath.getProvidersDirPath(profileId);
-    await Directory(directoryPath).create(recursive: true);
-    final file = File(p.join(directoryPath, 'aggregate_nodes.yaml'));
+    final file = File(
+      await appPath.getProvidersDirPath(
+        profileId,
+        children: ['aggregate_nodes.yaml'],
+      ),
+    );
+    await file.parent.create(recursive: true);
     final content = await encodeYamlTask({'proxies': proxies});
     await file.writeAsString(content, flush: true);
     return file.path;

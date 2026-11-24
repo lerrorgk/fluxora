@@ -19,6 +19,7 @@ import (
 
 	"github.com/metacubex/mihomo/adapter"
 	"github.com/metacubex/mihomo/adapter/outboundgroup"
+	"github.com/metacubex/mihomo/adapter/provider"
 	"github.com/metacubex/mihomo/common/observable"
 	"github.com/metacubex/mihomo/common/utils"
 	"github.com/metacubex/mihomo/common/yaml"
@@ -31,6 +32,7 @@ import (
 	"github.com/metacubex/mihomo/constant"
 	"github.com/metacubex/mihomo/constant/features"
 	cp "github.com/metacubex/mihomo/constant/provider"
+	"github.com/metacubex/mihomo/dns"
 	"github.com/metacubex/mihomo/hub/executor"
 	"github.com/metacubex/mihomo/listener"
 	"github.com/metacubex/mihomo/log"
@@ -124,9 +126,11 @@ func handleStartListener() bool {
 	general := currentConfig.General
 	if (general.MixedPort > 0 && listener.GetPorts().MixedPort != general.MixedPort) ||
 		(!features.Android && general.Tun.Enable && !listener.GetTunConf().Enable) {
-		isRunning = false
-		listener.StopListener()
+		stopListeners()
 		return false
+	}
+	if !features.Android {
+		dns.SetServerEnabled(true)
 	}
 
 	listener.SetTunnelListeners(true, currentConfig.Tunnels, tunnel.Tunnel)
@@ -137,8 +141,7 @@ func handleStartListener() bool {
 func handleStopListener() bool {
 	runLock.Lock()
 	defer runLock.Unlock()
-	isRunning = false
-	listener.StopListener()
+	stopListeners()
 	return true
 }
 
@@ -157,7 +160,7 @@ func handleForceGc(forceFreeOSMemory bool) {
 }
 
 func handleShutdown() bool {
-	stopListeners()
+	handleStopListener()
 	executor.Shutdown()
 	runtime.GC()
 	debug.FreeOSMemory()
@@ -827,9 +830,9 @@ func handleSetupConfig(bytes []byte) string {
 		_ = setupConfig(defaultSetupParams())
 		return err.Error()
 	}
-	clearSuspendedHealthChecks()
-	clearSuspendedWireGuard()
 	suspendModeLock.Lock()
+	provider.SetHealthChecksPaused(false)
+	clearSuspendedWireGuard()
 	currentSuspendMode = 0
 	suspendModeLock.Unlock()
 	err = setupConfig(params)
@@ -858,7 +861,7 @@ func handleSuspend(mode int) bool {
 		}
 		log.Infoln("[APP] Suspend mode enabled")
 		tunnel.OnSuspend()
-		pauseHealthChecks()
+		provider.SetHealthChecksPaused(true)
 		pauseWireGuard()
 
 		mihomoNtp.ReCreateNTPService("", 0, "", nil, false)
@@ -876,7 +879,7 @@ func handleSuspend(mode int) bool {
 			return true
 		}
 		log.Infoln("[APP] Doze suspend mode enabled")
-		pauseHealthChecks()
+		provider.SetHealthChecksPaused(true)
 		runtime.GC()
 		currentSuspendMode = 2
 
@@ -887,10 +890,10 @@ func handleSuspend(mode int) bool {
 		log.Infoln("[APP] Resume from suspend")
 		prevMode := currentSuspendMode
 		currentSuspendMode = 0
+		provider.SetHealthChecksPaused(false)
 
 		if prevMode == 1 {
 			tunnel.OnRunning()
-			resumeHealthChecks()
 			resumeWireGuard()
 
 			runLock.Lock()
@@ -906,8 +909,6 @@ func handleSuspend(mode int) bool {
 					c.WriteToSystem,
 				)
 			}
-		} else if prevMode == 2 {
-			resumeHealthChecks()
 		}
 
 	default:
@@ -917,6 +918,9 @@ func handleSuspend(mode int) bool {
 }
 
 func init() {
+	if !features.Android {
+		dns.SetServerEnabled(false)
+	}
 	listener.SetTunnelListeners(false, nil, nil)
 	adapter.UrlTestHook = func(url string, name string, delay uint16) {
 		delayData := &Delay{

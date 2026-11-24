@@ -4,7 +4,10 @@ import 'dart:io';
 import 'dart:typed_data';
 
 import 'package:fluxora/clash/core.dart';
+import 'package:fluxora/common/archive.dart'
+    show profileFilesLock, replaceDataFiles;
 import 'package:fluxora/common/common.dart';
+import 'package:fluxora/common/data_path.dart';
 import 'package:fluxora/enum/enum.dart';
 import 'package:freezed_annotation/freezed_annotation.dart';
 
@@ -227,23 +230,41 @@ extension ProfileExtension on Profile {
       subscriptionInfo: SubscriptionInfo.formHString(userinfo),
     );
     var content = await _validatedContent(utf8.decode(response.data));
-    if (mergeManualNodes != null) {
-      final merged = await mergeManualNodes(content);
-      if (merged != content) content = await _validatedContent(merged);
-    }
-    return updated._writeContent(content, canCommit: canCommit);
+    return profileFilesLock.synchronized(() async {
+      if (canCommit?.call() == false) return this;
+      if (mergeManualNodes != null) {
+        final merged = await mergeManualNodes(content);
+        if (merged != content) content = await _validatedContent(merged);
+      }
+      return updated._writeContent(content, canCommit: canCommit);
+    });
   }
 
   Future<Profile> saveFile(
     Uint8List bytes, {
     bool Function()? canCommit,
-  }) async => _writeContent(
-    await _validatedContent(utf8.decode(bytes)),
-    canCommit: canCommit,
-  );
+  }) async {
+    final content = await _validatedContent(utf8.decode(bytes));
+    return profileFilesLock.synchronized(
+      () => _writeContent(content, canCommit: canCommit),
+    );
+  }
 
-  Future<Profile> saveFileWithString(String value) async =>
-      _writeContent(await _validatedContent(value));
+  Future<Profile> saveFileWithString(
+    String value, {
+    List<Map<String, dynamic>>? manualNodes,
+  }) async {
+    final content = await _validatedContent(value);
+    return profileFilesLock.synchronized(() async {
+      if (manualNodes == null) return _writeContent(content);
+      checkedDataPathSegment(id);
+      await replaceDataFiles(await appPath.homeDirPath, [
+        MapEntry('$profilesDirectoryName/$id.yaml', utf8.encode(content)),
+        MapEntry('manual_proxies_$id.json', utf8.encode(jsonEncode(manualNodes))),
+      ]);
+      return copyWith(lastUpdateDate: DateTime.now());
+    });
+  }
 
   Future<String> _validatedContent(String content) async {
     if (content.trim().isEmpty) {

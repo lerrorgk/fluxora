@@ -12,14 +12,13 @@ class Proxy extends ProxyPlatform {
   static String url = "127.0.0.1";
   static const _windows = MethodChannel('proxy');
 
-  Future<bool?> startOwnedWindowsProxy(int port, List<String> bypass) =>
+  Future<bool?> startDefaultWindowsProxy(int port, List<String> bypass) =>
       _windows.invokeMethod<bool>('StartProxy', {
-        'port': port, 'bypassDomain': bypass, 'own': true,
+        'port': port, 'bypassDomain': bypass, 'defaultOnly': true,
       });
 
-  /// Null when the snapshot belongs to an earlier process.
-  Future<bool?> releaseWindowsSessionProxy() =>
-      _windows.invokeMethod<bool>('ReleaseSessionProxy');
+  Future<bool?> stopDefaultWindowsProxy() =>
+      _windows.invokeMethod<bool>('StopDefaultWindowsProxy');
 
   @override
   Future<bool?> startProxy(

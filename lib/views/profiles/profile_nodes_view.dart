@@ -103,10 +103,10 @@ class _ProfileNodesViewState extends State<ProfileNodesView> {
     );
     if (confirm != true) return;
 
-    final updated = await ManualProxyHelper.deleteProxyFromProfile(
-      _profile,
-      proxyName,
+    final updated = await globalState.appController.safeRun(
+      () => ManualProxyHelper.deleteProxyFromProfile(_profile, proxyName),
     );
+    if (!mounted || updated == null) return;
     setState(() => _profile = updated);
     await _loadProxies();
     if (mounted) {
@@ -209,11 +209,17 @@ class _ProfileNodesViewState extends State<ProfileNodesView> {
                 }
                 Navigator.of(ctx).pop();
                 setState(() => _isLoading = true);
-                final updated =
-                    await ManualProxyHelper.addOrUpdateProxiesToProfile(
-                      _profile,
-                      parsedList,
-                    );
+                final updated = await globalState.appController.safeRun(
+                  () => ManualProxyHelper.addOrUpdateProxiesToProfile(
+                    _profile,
+                    parsedList,
+                  ),
+                );
+                if (!mounted) return;
+                if (updated == null) {
+                  setState(() => _isLoading = false);
+                  return;
+                }
                 setState(() => _profile = updated);
                 await _loadProxies();
                 if (mounted) {
@@ -498,11 +504,10 @@ class _ProfileNodesViewState extends State<ProfileNodesView> {
 
   Future<void> _deleteNames(Set<String> names) async {
     if (names.isEmpty) return;
-    final result = await ManualProxyHelper.deleteProxiesFromProfile(
-      _profile,
-      names,
+    final result = await globalState.appController.safeRun(
+      () => ManualProxyHelper.deleteProxiesFromProfile(_profile, names),
     );
-    if (!mounted) return;
+    if (!mounted || result == null) return;
     setState(() {
       _profile = result.profile;
       _delays.removeWhere((name, _) => names.contains(name));
@@ -1077,6 +1082,7 @@ class _ManualNodeFormDialogState extends State<_ManualNodeFormDialog> {
   final _pbkCtrl = TextEditingController(); // Reality / WireGuard public key
   final _sidCtrl = TextEditingController(); // Reality short id
   final _customConfigCtrl = TextEditingController();
+  String? _customConfigError;
 
   // AmneziaWG fields
   final _jcCtrl = TextEditingController(text: '4');
@@ -1123,6 +1129,7 @@ class _ManualNodeFormDialogState extends State<_ManualNodeFormDialog> {
   void _onProtocolChanged(ManualProtocol proto) {
     setState(() {
       _protocol = proto;
+      _customConfigError = null;
       switch (proto) {
         case ManualProtocol.vless:
           _portCtrl.text = '443';
@@ -1215,16 +1222,17 @@ class _ManualNodeFormDialogState extends State<_ManualNodeFormDialog> {
 
   Map<String, dynamic> _buildProxyMap() {
     if (_protocol == ManualProtocol.custom) {
-      try {
-        final loaded = loadYaml(_customConfigCtrl.text.trim());
-        if (loaded is Map) {
-          return ManualProxyHelper.deepConvertYamlMap(loaded);
+      final loaded = loadYaml(_customConfigCtrl.text);
+      if (loaded is! Map) {
+        throw FormatException(appLocalizations.parseNoValidNode);
+      }
+      for (final key in ['name', 'type']) {
+        final value = loaded[key];
+        if (value is! String || value.trim().isEmpty) {
+          throw FormatException('${appLocalizations.formatError} ($key)');
         }
-      } catch (_) {}
-      return {
-        'name': 'Custom_${DateTime.now().millisecondsSinceEpoch}',
-        'type': 'direct',
-      };
+      }
+      return ManualProxyHelper.deepConvertYamlMap(loaded);
     }
 
     if (_protocol == ManualProtocol.direct) {
@@ -1563,8 +1571,15 @@ class _ManualNodeFormDialogState extends State<_ManualNodeFormDialog> {
                 TextField(
                   controller: _customConfigCtrl,
                   maxLines: 10,
+                  onChanged: (_) {
+                    if (_customConfigError != null) {
+                      setState(() => _customConfigError = null);
+                    }
+                  },
                   decoration: InputDecoration(
                     labelText: appLocalizations.customConfigLabel,
+                    errorText: _customConfigError,
+                    errorMaxLines: 3,
                     hintText:
                         'name: Custom_01\ntype: wireguard\nserver: 1.2.3.4\n...',
                     border: const OutlineInputBorder(),
@@ -2094,19 +2109,23 @@ class _ManualNodeFormDialogState extends State<_ManualNodeFormDialog> {
               context.showSnackBar(appLocalizations.serverAddressRequired);
               return;
             }
-            final proxyMap = _buildProxyMap();
-            Navigator.of(context).pop();
-
-            final updated = await ManualProxyHelper.addOrUpdateProxiesToProfile(
-              widget.profile,
-              [proxyMap],
-            );
-            widget.onSaved(updated);
-            if (context.mounted) {
-              context.showNotifier(
-                appLocalizations.nodeAdded(proxyMap['name']),
-              );
+            final Map<String, dynamic> proxyMap;
+            try {
+              proxyMap = _buildProxyMap();
+            } on FormatException catch (error) {
+              setState(() => _customConfigError = error.message);
+              return;
             }
+            final updated = await globalState.appController.safeRun(
+              () => ManualProxyHelper.addOrUpdateProxiesToProfile(
+                widget.profile,
+                [proxyMap],
+              ),
+            );
+            if (!context.mounted || updated == null) return;
+            widget.onSaved(updated);
+            context.showNotifier(appLocalizations.nodeAdded(proxyMap['name']));
+            Navigator.of(context).pop();
           },
           child: Text(appLocalizations.saveNode),
         ),

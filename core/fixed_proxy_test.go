@@ -150,8 +150,8 @@ listeners:
 		t.Fatal(err)
 	}
 	defer occupied.Close()
-	if !handleStartListener() || updateListeners() == nil {
-		t.Fatal("expected a fixed-port bind error with the main listener running")
+	if !handleStartListener() || updateListeners() != nil || !request("http", ports[2]) {
+		t.Fatal("a failed optional port blocked the other listeners during reload")
 	}
 	if fixedListenerStatus()["fluxora-fixed-chain"] == "" {
 		t.Fatal("occupied fixed listener reported as bound")

@@ -3,10 +3,52 @@ import 'dart:io';
 
 import 'package:archive/archive_io.dart';
 import 'package:fluxora/common/archive.dart';
+import 'package:fluxora/common/data_path.dart';
 import 'package:flutter_test/flutter_test.dart';
 import 'package:path/path.dart' as p;
 
 void main() {
+  test('profile IDs must be portable path components', () {
+    for (final id in ['17423', 'legacy-01_ab', '香港 A.2']) {
+      expect(checkedDataPathSegment(id), id);
+    }
+    for (final id in [
+      '',
+      '.',
+      '..',
+      'dir/node',
+      r'dir\node',
+      'X:id',
+      'CON',
+      'name. ',
+    ]) {
+      expect(() => checkedDataPathSegment(id), throwsFormatException);
+    }
+  });
+  test(
+    'restore refuses a linked parent before installing other entries',
+    () async {
+      final home = await Directory.systemTemp.createTemp(
+        'fluxora_restore_links_',
+      );
+      addTearDown(() => home.delete(recursive: true));
+      final actual = await Directory(p.join(home.path, 'actual')).create();
+      final linked = Link(p.join(home.path, 'profiles'));
+      await linked.create(actual.path);
+      final prior = await File(
+        p.join(home.path, 'prior'),
+      ).writeAsString('original');
+      await expectLater(
+        restoreBackupFiles([
+          ArchiveFile.string('prior', 'changed'),
+          ArchiveFile.string('profiles/sample.yaml', 'sample'),
+        ], home.path),
+        throwsA(isA<FileSystemException>()),
+      );
+      expect(await prior.readAsString(), 'original');
+      expect(await actual.list().isEmpty, isTrue);
+    },
+  );
   test('legacy profiles-only restore ignores Android app selection', () {
     final selection = {
       'enable': true,
@@ -16,11 +58,50 @@ void main() {
       final config = {
         'vpnProps': {key: selection},
       };
-      expect(legacyBackupAccessControl(config, restoreAll: false), isNull);
-      expect(legacyBackupAccessControl(config, restoreAll: true), selection);
+      expect(backupAccessControl(config, restoreAll: false), isNull);
+      expect(backupAccessControl(config, restoreAll: true), selection);
     }
-    expect(legacyBackupAccessControl({}, restoreAll: true), isNull);
+    expect(backupAccessControl({}, restoreAll: true), isNull);
+    final empty = {'enable': false, 'acceptList': [], 'rejectList': []};
+    expect(
+      backupAccessControl({
+        'vpnProps': {'accessControl': empty},
+      }, restoreAll: true),
+      empty,
+    );
   });
+
+  test(
+    'restore canonicalizes profile filenames and clears absent manual nodes only on overwrite',
+    () async {
+      final home = await Directory.systemTemp.createTemp(
+        'fluxora_restore_legacy_',
+      );
+      addTearDown(() => home.delete(recursive: true));
+      final store = File(p.join(home.path, 'manual_proxies_a.json'));
+      await store.writeAsString('[{"name":"later-node"}]');
+      final snapshot = Archive()
+        ..add(ArchiveFile.string('profiles/a.yml', 'original'));
+      final manifest = FluxoraBackupFiles({'a'}, {});
+      Future<void> restore(bool overwrite) => restoreBackupFiles(
+        manifest.entriesForRestore(snapshot, all: false, overwrite: overwrite),
+        home.path,
+      );
+      await restore(false);
+      expect(await store.readAsString(), contains('later-node'));
+      await restore(true);
+      expect(await store.readAsString(), '[]');
+      final canonical = File(p.join(home.path, 'profiles', 'a.yaml'));
+      expect(await canonical.readAsString(), 'original');
+      expect(
+        await File(p.join(home.path, 'profiles', 'a.yml')).exists(),
+        isFalse,
+      );
+      snapshot.add(ArchiveFile.string('profiles/a.yaml', 'conflicting'));
+      await expectLater(restore(true), throwsFormatException);
+      expect(await canonical.readAsString(), 'original');
+    },
+  );
   test(
     'a failed file replacement rolls back previously installed files',
     () async {

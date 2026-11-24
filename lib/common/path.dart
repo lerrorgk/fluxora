@@ -2,6 +2,7 @@ import 'dart:async';
 import 'dart:io';
 
 import 'package:fluxora/common/common.dart';
+import 'package:fluxora/common/data_path.dart';
 import 'package:fluxora/common/protected_helper.dart';
 import 'package:flutter/foundation.dart';
 
@@ -281,8 +282,16 @@ class AppPath {
   }
 
   Future<String> getProfilePath(String id) async {
-    final directory = await profilesPath;
-    return join(directory, '$id.yaml');
+    checkedDataPathSegment(id);
+    return checkedDataPath(await homeDirPath, [
+      profilesDirectoryName,
+      '$id.yaml',
+    ]);
+  }
+
+  Future<String> getManualProxiesPath(String id) async {
+    checkedDataPathSegment(id);
+    return checkedDataPath(await homeDirPath, ['manual_proxies_$id.json']);
   }
 
   Future<String> getScriptPath(String id) async {
@@ -291,9 +300,16 @@ class AppPath {
     return join(directory.path, 'scripts', '${basename(id)}.js');
   }
 
-  Future<String> getProvidersDirPath(String id) async {
-    final directory = await profilesPath;
-    return join(directory, 'providers', id);
+  Future<String> getProvidersDirPath(
+    String id, {
+    List<String> children = const [],
+  }) async {
+    return checkedDataPath(await homeDirPath, [
+      profilesDirectoryName,
+      'providers',
+      id,
+      ...children,
+    ]);
   }
 
   Future<String> getProvidersFilePath(
@@ -301,8 +317,7 @@ class AppPath {
     String type,
     String url,
   ) async {
-    final directory = await profilesPath;
-    return join(directory, 'providers', id, type, url.toMd5());
+    return getProvidersDirPath(id, children: [type, url.toMd5()]);
   }
 
   Future<String> get tempPath async {

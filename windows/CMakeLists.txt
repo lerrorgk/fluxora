@@ -96,20 +96,24 @@ set(CLASH_DIR "../libclash/windows")
 #   set(CLASH_DIR "../libclash/windows/x86")
 # endif()
 
-install(PROGRAMS "${CLASH_DIR}/FluxoraCore.exe" DESTINATION "${INSTALL_BUNDLE_LIB_DIR}"
-  CONFIGURATIONS Profile;Release
-  COMPONENT Runtime)
-
-install(PROGRAMS "${CLASH_DIR}/FluxoraDevCore.exe" DESTINATION "${INSTALL_BUNDLE_LIB_DIR}"
-  CONFIGURATIONS Debug
-  COMPONENT Runtime)
-
-install(PROGRAMS "${CLASH_DIR}/FluxoraDevHelperService.exe" DESTINATION "${INSTALL_BUNDLE_LIB_DIR}"
-  CONFIGURATIONS Debug
-  COMPONENT Runtime)
-
-install(PROGRAMS "${CLASH_DIR}/FluxoraHelperService.exe" DESTINATION "${INSTALL_BUNDLE_LIB_DIR}"
-  CONFIGURATIONS Profile;Release
+# A local --dev package is a Release build with APP_DEV=true in DART_DEFINES.
+file(STRINGS "${FLUTTER_MANAGED_DIR}/ephemeral/generated_config.cmake" APP_DEV_DEFINE
+  REGEX "DART_DEFINES=([^\"]*,)?QVBQX0RFVj10cnVl[,\"]")
+if(APP_DEV_DEFINE)
+  set(CORE_VARIANT "Dev")
+  set(OTHER_VARIANT "")
+else()
+  set(CORE_VARIANT "$<$<CONFIG:Debug>:Dev>")
+  set(OTHER_VARIANT "$<$<NOT:$<CONFIG:Debug>>:Dev>")
+endif()
+# Flutter reuses the Release bundle when toggling --dev.
+install(CODE "
+  file(REMOVE \"${INSTALL_BUNDLE_LIB_DIR}/Fluxora${OTHER_VARIANT}Core.exe\"
+              \"${INSTALL_BUNDLE_LIB_DIR}/Fluxora${OTHER_VARIANT}HelperService.exe\")
+  " COMPONENT Runtime)
+install(PROGRAMS "${CLASH_DIR}/Fluxora${CORE_VARIANT}Core.exe"
+                 "${CLASH_DIR}/Fluxora${CORE_VARIANT}HelperService.exe"
+  DESTINATION "${INSTALL_BUNDLE_LIB_DIR}"
   COMPONENT Runtime)
 
 # Fluxora's own loopback exemption helper, installed beside the app executable

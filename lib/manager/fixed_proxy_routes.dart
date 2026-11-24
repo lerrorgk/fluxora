@@ -249,8 +249,10 @@ class FixedProxyRoutes extends ChangeNotifier {
       try {
         if (running) {
           await globalState.appController.applyProfile(silence: true);
-          final issue = issues[route?.port];
-          if (issue != null) throw StateError(issue);
+          if (route != null && route.enabled) {
+            final issue = issueFor(route.port);
+            if (issue != null) throw StateError(issue);
+          }
         }
         final storage = await _storage();
         await storage.save({
