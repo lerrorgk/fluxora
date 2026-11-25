@@ -144,12 +144,15 @@ jobs:
           java-version: '17'
           cache: 'gradle'
 
-      - name: Setup Android NDK
+      - name: Setup Android NDK and CMake
         if: matrix.platform == 'android'
         shell: bash
         run: |
           NDK_VERSION="28.2.13676358"
-          yes | "${ANDROID_SDK_ROOT}/cmdline-tools/latest/bin/sdkmanager" --install "ndk;${NDK_VERSION}" >/dev/null 2>&1 || true
+          CMAKE_VERSION="3.22.1"
+          yes | "${ANDROID_SDK_ROOT}/cmdline-tools/latest/bin/sdkmanager" --install "ndk;${NDK_VERSION}" "cmake;${CMAKE_VERSION}" >/dev/null 2>&1 || true
+          test -d "${ANDROID_SDK_ROOT}/ndk/${NDK_VERSION}"
+          test -d "${ANDROID_SDK_ROOT}/cmake/${CMAKE_VERSION}"
           echo "ANDROID_NDK=${ANDROID_SDK_ROOT}/ndk/${NDK_VERSION}" >> "$GITHUB_ENV"
 
       - name: Configure Cargo for Android
