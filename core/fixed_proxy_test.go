@@ -199,7 +199,7 @@ func TestInvalidFixedRouteIsIsolatedAndPortHandoffSucceeds(t *testing.T) {
 	}))
 	defer origin.Close()
 	exitPort, _ := fixedTestHop(t, origin.Listener.Addr().String())
-	ports := make([]int, 3)
+	ports := make([]int, 4)
 	var reserved []net.Listener
 	for i := range ports {
 		sock, err := net.Listen("tcp", "127.0.0.1:0")
@@ -214,22 +214,28 @@ func TestInvalidFixedRouteIsIsolatedAndPortHandoffSucceeds(t *testing.T) {
 	}
 
 	// Start with a non-fixed custom listener holding ports[1], plus one healthy
-	// fixed route and one broken private fixed route.
+	// fixed route on ports[2] and one broken private fixed route on ports[3].
 	rawA := fmt.Sprintf(`mixed-port: %d
 mode: global
 proxies:
   - {name: fluxora-fixed-good-hop-1, type: http, server: 127.0.0.1, port: %d, fluxora-private: true}
-  - {name: fluxora-fixed-bad-hop-1, type: vless, server: 127.0.0.1, port: 443, uuid: not-a-uuid, fluxora-private: true}
+  - {name: fluxora-fixed-bad-hop-1, type: ss, server: 127.0.0.1, port: 443, cipher: nonexistent-cipher, password: x, fluxora-private: true}
   - {name: fluxora-fixed-bad-hop-2, type: http, server: 127.0.0.1, port: %d, dialer-proxy: fluxora-fixed-bad-hop-1, fluxora-private: true}
 listeners:
   - {name: custom-legacy, type: mixed, listen: 127.0.0.1, port: %d, proxy: DIRECT}
   - {name: fluxora-fixed-good, type: mixed, listen: 127.0.0.1, port: %d, proxy: fluxora-fixed-good-hop-1}
   - {name: fluxora-fixed-bad, type: mixed, listen: 127.0.0.1, port: %d, proxy: fluxora-fixed-bad-hop-2}
-`, ports[0], exitPort, exitPort, ports[1], ports[2], ports[1])
+`, ports[0], exitPort, exitPort, ports[1], ports[2], ports[3])
 
 	cfgA, err := config.Parse([]byte(rawA))
 	if err != nil {
 		t.Fatalf("broken private fixed route failed main config parse: %v", err)
+	}
+	if cfgA.ListenerErrors["fluxora-fixed-bad"] == nil {
+		t.Fatalf("expected parse error recorded for fluxora-fixed-bad, got %v", cfgA.ListenerErrors)
+	}
+	if _, exists := cfgA.Listeners["fluxora-fixed-bad"]; exists {
+		t.Fatal("broken fixed listener should not be registered in cfg.Listeners")
 	}
 	currentConfig = cfgA
 	tunnel.UpdateProxies(cfgA.Proxies, cfgA.Providers)
@@ -242,12 +248,16 @@ listeners:
 	if !tunnel.IsPrivateProxy("fluxora-fixed-good-hop-1") {
 		t.Fatal("private fixed hop was not tracked in tunnel.IsPrivateProxy")
 	}
+	if sock, err := net.Listen("tcp4", fmt.Sprintf("127.0.0.1:%d", ports[1])); err == nil {
+		sock.Close()
+		t.Fatal("custom-legacy did not bind ports[1] before handoff")
+	}
 	st := fixedListenerStatus()
 	if st["fluxora-fixed-good"] != "" {
 		t.Fatalf("healthy fixed listener failed: %v", st)
 	}
-	if st["fluxora-fixed-bad"] == "" {
-		t.Fatalf("broken fixed listener did not report parse error: %v", st)
+	if !strings.Contains(st["fluxora-fixed-bad"], "cipher") {
+		t.Fatalf("broken fixed listener did not report cipher parse error: %v", st)
 	}
 
 	// Switch to a config where custom-legacy is dropped and fluxora-fixed-handoff
